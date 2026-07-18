@@ -11,9 +11,17 @@ import os
 # ==========================================
 @st.cache_resource
 def load_model():
-    model_path = '/content/xgboost_btc_15m_3class_strict.pkl'
+    # 1순위: 스트림릿 클라우드 / 깃허브 환경 (같은 폴더에 있을 경우)
+    model_path = 'xgboost_btc_15m_3class_strict.pkl'
+    
+    # 2순위: 코랩 기본 경로
+    if not os.path.exists(model_path):
+        model_path = '/content/xgboost_btc_15m_3class_strict.pkl'
+        
+    # 3순위: 코랩 내부 학습 경로
     if not os.path.exists(model_path):
         model_path = './data/model/xgboost_btc_15m_3class_strict.pkl'
+        
     return joblib.load(model_path)
 
 # ==========================================
