@@ -28,28 +28,28 @@ def get_data():
     df = btc.history(period="60d", interval="15m")
     if df.index.tz is not None:
         df.index = df.index.tz_convert('Asia/Seoul').tz_localize(None)
-        
+
     df['Returns'] = df['Close'].pct_change()
     df['SMA_7'] = df['Close'].rolling(window=7).mean()
-    
+
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     df['RSI_14'] = 100 - (100 / (1 + gain / loss))
-    
+
     df['SMA_1H'] = df['Close'].rolling(window=4).mean()
     df['SMA_4H'] = df['Close'].rolling(window=16).mean()
     df['Vol_4H'] = df['Returns'].rolling(window=16).std()
     df['SMA_24H'] = df['Close'].rolling(window=96).mean()
-    
+
     df['BB_Std'] = df['Close'].rolling(window=20).std()
     df['BB_Width'] = (df['BB_Std'] * 4) / df['Close'].rolling(window=20).mean()
-    
+
     df.dropna(inplace=True)
     return df
 
 # ==========================================
-# 3. 백테스트 로직 (타점 기록 추가)
+# 3. 백테스트 로직 (매매 사유 상세 기록)
 # ==========================================
 def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
     balance = 10000.0
@@ -58,61 +58,61 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
     invested_margin = 0.0
     position_size = 0.0
     fee_rate = 0.0004
-    
+
     balance_history = []
-    trades = [] # 진입/청산 기록 저장
-    
+    trades = [] # 진입/청산 상세 기록 저장
+
     for i in range(len(df)):
         close_price = df['Close'].iloc[i]
         rsi = df['RSI_14'].iloc[i]
         prob = df['Max_Prob'].iloc[i]
         pred = df['Pred'].iloc[i]
         date = df.index[i]
-        
+
         if balance <= 0:
             balance_history.append(0)
             continue
-            
+
         net_profit = 0
         if position != 0:
             price_change_pct = (close_price - avg_entry_price) / avg_entry_price * position
             net_profit = (position_size * price_change_pct) - (position_size * fee_rate * 2)
-            
+
             # 강제 청산 조건 (마진 콜)
             if net_profit <= -invested_margin:
-                trades.append({'date': date, 'type': 'Liquidated', 'price': close_price})
+                trades.append({'date': date, 'type': '마진콜 청산', 'price': close_price})
                 balance -= invested_margin
                 position, invested_margin, position_size = 0, 0, 0
                 balance_history.append(balance)
                 continue
-            
+
             # RSI 기반 강제 청산
             if use_rsi_exit:
                 if (position == 1 and rsi >= 70) or (position == -1 and rsi <= 30):
-                    trades.append({'date': date, 'type': 'Exit', 'price': close_price})
+                    trades.append({'date': date, 'type': 'RSI 강제청산', 'price': close_price})
                     balance += net_profit
                     position, invested_margin, position_size = 0, 0, 0
                     balance_history.append(max(balance, 0))
                     continue
-                
+
         is_loss = (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
-        
+
         if position == 0:
             if prob >= entry_th:
                 if pred == 2:
                     position = 1
                     avg_entry_price, invested_margin = close_price, balance * invest_ratio
                     position_size = invested_margin * leverage
-                    trades.append({'date': date, 'type': 'Long Entry', 'price': close_price})
+                    trades.append({'date': date, 'type': 'Long 진입', 'price': close_price})
                 elif pred == 0:
                     position = -1
                     avg_entry_price, invested_margin = close_price, balance * invest_ratio
                     position_size = invested_margin * leverage
-                    trades.append({'date': date, 'type': 'Short Entry', 'price': close_price})
+                    trades.append({'date': date, 'type': 'Short 진입', 'price': close_price})
         else:
             if (position == 1 and pred == 0) or (position == -1 and pred == 2):
                 if prob >= exit_th:
-                    trades.append({'date': date, 'type': 'Exit', 'price': close_price})
+                    trades.append({'date': date, 'type': '신호 청산', 'price': close_price})
                     balance += net_profit
                     position, invested_margin, position_size = 0, 0, 0
             elif (position == 1 and pred == 2) or (position == -1 and pred == 0):
@@ -123,17 +123,17 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
                     avg_entry_price = (position_size * avg_entry_price + add_size * close_price) / total_size
                     invested_margin += add_margin
                     position_size = total_size
-                    trades.append({'date': date, 'type': 'Add Margin', 'price': close_price})
-                    
+                    trades.append({'date': date, 'type': '물타기', 'price': close_price})
+
         balance_history.append(max(balance + (net_profit if position != 0 else 0), 0))
-        
+
     return balance_history, trades
 
 # ==========================================
 # 4. Streamlit UI 구성
 # ==========================================
 st.set_page_config(layout="wide", page_title="BTC AI Trading Bot")
-st.title("비트코인 AI 15분봉 자동매매 시뮬레이터 (차트 & 기간 조절 포함)")
+st.title("비트코인 AI 15분봉 자동매매 시뮬레이터")
 
 # 데이터 및 모델 로드 (캐싱)
 model = load_model()
@@ -175,7 +175,7 @@ else:
     col1, col2, col3 = st.columns(3)
     col1.metric("초기 자본금", "$10,000.00")
     col2.metric("최종 자산", f"${hist[-1]:,.2f}", f"{(hist[-1]/10000 - 1)*100:.2f}%")
-    col3.metric("총 거래 횟수", f"{len([t for t in trades if 'Entry' in t['type']])} 회 진입")
+    col3.metric("총 거래 횟수", f"{len([t for t in trades if '진입' in t['type']])} 회 진입")
 
     # 자산 변화 차트
     st.subheader("💰 백테스트 누적 자산 변화")
@@ -194,10 +194,12 @@ else:
 
     # 타점 그리기
     margin = (df['High'].max() - df['Low'].min()) * 0.02
-    long_entries = [t for t in trades if t['type'] == 'Long Entry']
-    short_entries = [t for t in trades if t['type'] == 'Short Entry']
-    exits = [t for t in trades if t['type'] == 'Exit']
-    liquidations = [t for t in trades if t['type'] == 'Liquidated']
+    long_entries = [t for t in trades if t['type'] == 'Long 진입']
+    short_entries = [t for t in trades if t['type'] == 'Short 진입']
+    add_margins = [t for t in trades if t['type'] == '물타기']
+    model_exits = [t for t in trades if t['type'] == '신호 청산']
+    rsi_exits = [t for t in trades if t['type'] == 'RSI 강제청산']
+    liquidations = [t for t in trades if t['type'] == '마진콜 청산']
 
     if long_entries:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in long_entries], y=[t['price'] - margin for t in long_entries],
@@ -205,12 +207,33 @@ else:
     if short_entries:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in short_entries], y=[t['price'] + margin for t in short_entries],
                                         mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='darkred')), name='Short 진입'))
-    if exits:
-        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in exits], y=[t['price'] for t in exits],
-                                        mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='청산(종료)'))
+    if add_margins:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in add_margins], y=[t['price'] for t in add_margins],
+                                        mode='markers', marker=dict(symbol='star', size=10, color='blue'), name='물타기'))
+    if model_exits:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in model_exits], y=[t['price'] for t in model_exits],
+                                        mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='신호 청산(종료)'))
+    if rsi_exits:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in rsi_exits], y=[t['price'] for t in rsi_exits],
+                                        mode='markers', marker=dict(symbol='x', size=12, color='orange'), name='RSI 강제청산'))
     if liquidations:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in liquidations], y=[t['price'] for t in liquidations],
-                                        mode='markers', marker=dict(symbol='x', size=14, color='purple'), name='강제청산'))
+                                        mode='markers', marker=dict(symbol='x', size=14, color='purple'), name='마진콜 강제청산'))
 
     fig_candle.update_layout(template='plotly_dark', height=600, xaxis_rangeslider_visible=False, yaxis_title="Price (USD)")
     st.plotly_chart(fig_candle, use_container_width=True)
+
+    # ==========================================
+    # 매매 일지 표 (Trading Log)
+    # ==========================================
+    st.subheader("📝 상세 매매 일지 (Trading Log)")
+    if trades:
+        trades_df = pd.DataFrame(trades)
+        # 컬럼명 한글화 및 포맷팅
+        trades_df.columns = ['시간', '구분', '체결가(USD)']
+        trades_df['시간'] = pd.to_datetime(trades_df['시간']).dt.strftime('%Y-%m-%d %H:%M')
+        trades_df['체결가(USD)'] = trades_df['체결가(USD)'].apply(lambda x: f"${x:,.2f}")
+        
+        st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("해당 기간 동안 발생한 매매 내역이 없습니다.")
