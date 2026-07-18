@@ -80,7 +80,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
 
             # 강제 청산 조건 (마진 콜)
             if net_profit <= -invested_margin:
-                trades.append({'date': date, 'type': '마진콜 청산', 'price': close_price})
+                trades.append({'date': date, 'type': '마진콜 청산', 'price': close_price, 'profit': -invested_margin})
                 balance -= invested_margin
                 position, invested_margin, position_size = 0, 0, 0
                 balance_history.append(balance)
@@ -89,7 +89,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
             # RSI 기반 강제 청산
             if use_rsi_exit:
                 if (position == 1 and rsi >= 70) or (position == -1 and rsi <= 30):
-                    trades.append({'date': date, 'type': 'RSI 강제청산', 'price': close_price})
+                    trades.append({'date': date, 'type': 'RSI 강제청산', 'price': close_price, 'profit': net_profit})
                     balance += net_profit
                     position, invested_margin, position_size = 0, 0, 0
                     balance_history.append(max(balance, 0))
@@ -103,16 +103,16 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
                     position = 1
                     avg_entry_price, invested_margin = close_price, balance * invest_ratio
                     position_size = invested_margin * leverage
-                    trades.append({'date': date, 'type': 'Long 진입', 'price': close_price})
+                    trades.append({'date': date, 'type': 'Long 진입', 'price': close_price, 'profit': 0.0})
                 elif pred == 0:
                     position = -1
                     avg_entry_price, invested_margin = close_price, balance * invest_ratio
                     position_size = invested_margin * leverage
-                    trades.append({'date': date, 'type': 'Short 진입', 'price': close_price})
+                    trades.append({'date': date, 'type': 'Short 진입', 'price': close_price, 'profit': 0.0})
         else:
             if (position == 1 and pred == 0) or (position == -1 and pred == 2):
                 if prob >= exit_th:
-                    trades.append({'date': date, 'type': '신호 청산', 'price': close_price})
+                    trades.append({'date': date, 'type': '신호 청산', 'price': close_price, 'profit': net_profit})
                     balance += net_profit
                     position, invested_margin, position_size = 0, 0, 0
             elif (position == 1 and pred == 2) or (position == -1 and pred == 0):
@@ -123,7 +123,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
                     avg_entry_price = (position_size * avg_entry_price + add_size * close_price) / total_size
                     invested_margin += add_margin
                     position_size = total_size
-                    trades.append({'date': date, 'type': '물타기', 'price': close_price})
+                    trades.append({'date': date, 'type': '물타기', 'price': close_price, 'profit': 0.0})
 
         balance_history.append(max(balance + (net_profit if position != 0 else 0), 0))
 
@@ -230,10 +230,11 @@ else:
     if trades:
         trades_df = pd.DataFrame(trades)
         # 컬럼명 한글화 및 포맷팅
-        trades_df.columns = ['시간', '구분', '체결가(USD)']
+        trades_df.columns = ['시간', '구분', '체결가(USD)', '수익금(USD)']
         trades_df['시간'] = pd.to_datetime(trades_df['시간']).dt.strftime('%Y-%m-%d %H:%M')
         trades_df['체결가(USD)'] = trades_df['체결가(USD)'].apply(lambda x: f"${x:,.2f}")
-        
+        trades_df['수익금(USD)'] = trades_df['수익금(USD)'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
+
         st.dataframe(trades_df, use_container_width=True, hide_index=True)
     else:
         st.info("해당 기간 동안 발생한 매매 내역이 없습니다.")
