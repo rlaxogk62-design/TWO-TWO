@@ -182,8 +182,8 @@ else:
     fig_bal = go.Figure()
     fig_bal.add_trace(go.Scatter(x=df.index, y=df['Balance'], mode='lines', name='포트폴리오 가치', line=dict(color='cyan', width=2)))
     fig_bal.add_hline(y=10000, line_dash="dash", line_color="gray")
-    fig_bal.update_layout(template='plotly_dark', height=400, xaxis_title="Date", yaxis_title="Balance (USD)")
-    st.plotly_chart(fig_bal, use_container_width=True)
+    fig_bal.update_layout(template='plotly_dark', height=400, xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified')
+    st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
 
     # 캔들 및 타점 차트
     st.subheader("📈 비트코인 15분봉 및 진입/청산 타점 시각화")
@@ -220,8 +220,8 @@ else:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in liquidations], y=[t['price'] for t in liquidations],
                                         mode='markers', marker=dict(symbol='x', size=14, color='purple'), name='마진콜 강제청산'))
 
-    fig_candle.update_layout(template='plotly_dark', height=600, xaxis_rangeslider_visible=False, yaxis_title="Price (USD)")
-    st.plotly_chart(fig_candle, use_container_width=True)
+    fig_candle.update_layout(template='plotly_dark', height=600, xaxis_rangeslider_visible=False, yaxis_title="Price (USD)", dragmode='pan', hovermode='x unified')
+    st.plotly_chart(fig_candle, use_container_width=True, config={'scrollZoom': True})
 
     # ==========================================
     # 매매 일지 표 (Trading Log)
