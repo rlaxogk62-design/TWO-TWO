@@ -89,7 +89,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
             # RSI 기반 강제 청산
             if use_rsi_exit:
                 if (position == 1 and rsi >= rsi_long_th) or (position == -1 and rsi <= rsi_short_th):
-                    trades.append({'date': date, 'type': 'RSI 강제청산', 'price': close_price, 'profit': net_profit})
+                    trades.append({'date': date, 'type': 'RSI 초과 포지션 종료', 'price': close_price, 'profit': net_profit})
                     balance += net_profit
                     position, invested_margin, position_size = 0, 0, 0
                     balance_history.append(max(balance, 0))
@@ -153,7 +153,7 @@ leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 10)
 invest_ratio = st.sidebar.slider("1회 진입 비중 (%)", 1, 50, 10) / 100.0
 
 st.sidebar.markdown("---")
-use_rsi_exit = st.sidebar.checkbox("RSI 강제청산 적용", value=True)
+use_rsi_exit = st.sidebar.checkbox("RSI 초과 포지션 종료 적용", value=True)
 if use_rsi_exit:
     rsi_long_th = st.sidebar.slider("RSI 롱(Long) 청산 수치 (과매수)", min_value=50, max_value=95, value=70, step=1)
     rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치 (과매도)", min_value=5, max_value=50, value=30, step=1)
@@ -205,7 +205,7 @@ else:
     short_entries = [t for t in trades if t['type'] == 'Short 진입']
     add_margins = [t for t in trades if t['type'] == '물타기']
     model_exits = [t for t in trades if t['type'] == '신호 청산']
-    rsi_exits = [t for t in trades if t['type'] == 'RSI 강제청산']
+    rsi_exits = [t for t in trades if t['type'] == 'RSI 초과 포지션 종료']
     liquidations = [t for t in trades if t['type'] == '마진콜 청산']
 
     if long_entries:
@@ -222,7 +222,7 @@ else:
                                         mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='신호 청산(종료)'))
     if rsi_exits:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in rsi_exits], y=[t['price'] for t in rsi_exits],
-                                        mode='markers', marker=dict(symbol='x', size=12, color='orange'), name='RSI 강제청산'))
+                                        mode='markers', marker=dict(symbol='x', size=12, color='orange'), name='RSI 초과 포지션 종료'))
     if liquidations:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in liquidations], y=[t['price'] for t in liquidations],
                                         mode='markers', marker=dict(symbol='x', size=14, color='purple'), name='마진콜 강제청산'))
