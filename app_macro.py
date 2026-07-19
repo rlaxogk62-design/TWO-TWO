@@ -51,7 +51,7 @@ def get_data():
 # ==========================================
 # 3. 백테스트 로직 (매매 사유 상세 기록)
 # ==========================================
-def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
+def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rsi_long_th=70, rsi_short_th=30):
     balance = 10000.0
     position = 0
     avg_entry_price = 0.0
@@ -88,7 +88,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit):
 
             # RSI 기반 강제 청산
             if use_rsi_exit:
-                if (position == 1 and rsi >= 70) or (position == -1 and rsi <= 30):
+                if (position == 1 and rsi >= rsi_long_th) or (position == -1 and rsi <= rsi_short_th):
                     trades.append({'date': date, 'type': 'RSI 강제청산', 'price': close_price, 'profit': net_profit})
                     balance += net_profit
                     position, invested_margin, position_size = 0, 0, 0
@@ -151,7 +151,14 @@ exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.3, 
 st.sidebar.markdown("---")
 leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 10)
 invest_ratio = st.sidebar.slider("1회 진입 비중 (%)", 1, 50, 10) / 100.0
-use_rsi_exit = st.sidebar.checkbox("RSI 강제청산 적용 (Long >= 70, Short <= 30)", value=True)
+
+st.sidebar.markdown("---")
+use_rsi_exit = st.sidebar.checkbox("RSI 강제청산 적용", value=True)
+if use_rsi_exit:
+    rsi_long_th = st.sidebar.slider("RSI 롱(Long) 청산 수치 (과매수)", min_value=50, max_value=95, value=70, step=1)
+    rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치 (과매도)", min_value=5, max_value=50, value=30, step=1)
+else:
+    rsi_long_th, rsi_short_th = 70, 30
 
 # 선택한 날짜에 맞게 데이터 필터링
 df = raw_df[raw_df.index >= pd.to_datetime(start_date)]
@@ -168,7 +175,7 @@ else:
     df['Pred'] = np.argmax(probs, axis=1)
 
     # 백테스트 실행 (타점 리스트 받아오기)
-    hist, trades = run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit)
+    hist, trades = run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rsi_long_th, rsi_short_th)
     df['Balance'] = hist
 
     # 상단 요약
