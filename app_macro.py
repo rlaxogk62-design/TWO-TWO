@@ -112,7 +112,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
         else:
             if (position == 1 and pred == 0) or (position == -1 and pred == 2):
                 if prob >= exit_th:
-                    trades.append({'date': date, 'type': '신호 청산', 'price': close_price, 'profit': net_profit})
+                    trades.append({'date': date, 'type': '신호 포지션 종료', 'price': close_price, 'profit': net_profit})
                     balance += net_profit
                     position, invested_margin, position_size = 0, 0, 0
             elif (position == 1 and pred == 2) or (position == -1 and pred == 0):
@@ -204,7 +204,7 @@ else:
     long_entries = [t for t in trades if t['type'] == 'Long 진입']
     short_entries = [t for t in trades if t['type'] == 'Short 진입']
     add_margins = [t for t in trades if t['type'] == '물타기']
-    model_exits = [t for t in trades if t['type'] == '신호 청산']
+    model_exits = [t for t in trades if t['type'] == '신호 포지션 종료']
     rsi_exits = [t for t in trades if t['type'] == 'RSI 초과 포지션 종료']
     liquidations = [t for t in trades if t['type'] == '마진콜 청산']
 
@@ -219,7 +219,7 @@ else:
                                         mode='markers', marker=dict(symbol='star', size=10, color='blue'), name='물타기'))
     if model_exits:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in model_exits], y=[t['price'] for t in model_exits],
-                                        mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='신호 청산(종료)'))
+                                        mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='신호 포지션 종료'))
     if rsi_exits:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in rsi_exits], y=[t['price'] for t in rsi_exits],
                                         mode='markers', marker=dict(symbol='x', size=12, color='orange'), name='RSI 초과 포지션 종료'))
