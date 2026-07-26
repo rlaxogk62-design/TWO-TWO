@@ -1,5 +1,6 @@
 import streamlit as st
 import ccxt
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import joblib
@@ -21,21 +22,29 @@ def load_ver2_model():
     return joblib.load(model_path)
 
 # ==========================================
-# 2. 바이낸스 선물 과거 데이터 수집 및 ver_2 피처 전처리
+# 2. 데이터 수집 (바이낸스 선물 우선, 실패시 yfinance 백업) 및 ver_2 피처 전처리
 # ==========================================
 @st.cache_data(ttl=900)
-def get_binance_data(total_candles=10000):
-    exchange = ccxt.binance({'options': {'defaultType': 'future'}})
-    symbol = 'BTC/USDT'
-    timeframe = '15m'
+def get_candle_data():
+    df = None
     
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=1500)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    
-    # 시간대 한국 시간(KST) 변환
-    df.index = df.index.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
+    # 1차 시도: 바이낸스 선물 API (ccxt)
+    try:
+        exchange = ccxt.binance({'options': {'defaultType': 'future'}, 'timeout': 5000})
+        symbol = 'BTC/USDT'
+        timeframe = '15m'
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=1500)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df.index = df.index.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
+    except Exception as e:
+        # Streamlit Cloud 미국 IP 지오블록(ExchangeNotAvailable) 발생 시 yfinance로 자동 백업
+        btc = yf.Ticker("BTC-USD")
+        df = btc.history(period="60d", interval="15m")
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert('Asia/Seoul').tz_localize(None)
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
 
     # ver_2 피처 엔지니어링 (정상성 변환, ta 지표, MTF 1시간봉 비율)
     df['Returns'] = df['Close'].pct_change()
@@ -149,10 +158,10 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
 # 4. Streamlit UI 구성
 # ==========================================
 st.set_page_config(layout="wide", page_title="BTC ver_2 AI 시뮬레이터", page_icon="📈")
-st.title("📈 비트코인 ver_2 AI 선물 시뮬레이터 (바이낸스 연동)")
+st.title("📈 비트코인 ver_2 AI 선물 시뮬레이터")
 
 model = load_ver2_model()
-raw_df = get_binance_data()
+raw_df = get_candle_data()
 
 st.sidebar.header("📅 투자 기간 설정")
 min_date = raw_df.index.min().date()
@@ -203,7 +212,7 @@ else:
     fig_bal.update_layout(template='plotly_dark', height=400, xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified')
     st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
 
-    st.subheader("📈 바이낸스 15분봉 및 ver_2 진입/청산 타점 시각화")
+    st.subheader("📈 15분봉 및 ver_2 진입/청산 타점 시각화")
     fig_candle = go.Figure(data=[go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='BTC Price',
         increasing_line_color='green', decreasing_line_color='red'
