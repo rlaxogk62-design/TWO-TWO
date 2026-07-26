@@ -26,9 +26,9 @@ if not API_KEY or not SECRET_KEY:
 @st.cache_resource
 def load_ver2_model():
     model_path = os.path.join(BASE_DIR, 'xgboost_btc_15m_v2_advanced.pkl')
-    if os.path.exists(model_path):
-        return joblib.load(model_path)
-    return None
+    if not os.path.exists(model_path):
+        model_path = os.path.join(BASE_DIR, 'ver_2', 'models', 'xgboost_btc_15m_v2_advanced.pkl')
+    return joblib.load(model_path)
 
 model = load_ver2_model()
 
@@ -55,11 +55,20 @@ def fetch_live_data():
         usdt_total = float(account_info.get('totalWalletBalance', 0.0))
         usdt_free = float(account_info.get('availableBalance', 0.0))
         
-        positions = exchange.fetch_positions([SYMBOL])
+        # 포지션 정밀 조회 (LONG / SHORT 정밀 판별)
         pos_data = None
-        for p in positions:
-            if p['symbol'] == SYMBOL and float(p['contracts']) > 0:
-                pos_data = p
+        raw_positions = exchange.fapiPrivateV2GetPositionRisk({'symbol': 'BTCUSDT'})
+        for p in raw_positions:
+            amt = float(p.get('positionAmt', 0))
+            if amt != 0:
+                pos_data = {
+                    'symbol': 'BTC/USDT',
+                    'side': 'LONG' if amt > 0 else 'SHORT',
+                    'contracts': abs(amt),
+                    'entryPrice': float(p.get('entryPrice', 0)),
+                    'unrealizedPnl': float(p.get('unRealizedProfit', 0)),
+                    'leverage': int(p.get('leverage', 25))
+                }
                 break
                 
         ohlcv = exchange.fetch_ohlcv(SYMBOL, '15m', limit=150)
