@@ -1,5 +1,6 @@
 .env
 *.pkl
+!xgboost_btc_15m_v2_advanced.pkl
 __pycache__/
 *.pyc
 .vscode/
