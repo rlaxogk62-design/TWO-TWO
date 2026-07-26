@@ -138,7 +138,7 @@ def fetch_live_monitoring():
                 }
                 break
         return usdt_total, usdt_free, pos_data
-    except Exception as e:
+    except Exception:
         return None, None, None
 
 # 사이드바 메뉴 선택
@@ -155,7 +155,6 @@ if mode == "🤖 실시간 자동매매 모니터링":
     if raw_df is not None and not raw_df.empty:
         current_price = raw_df['Close'].iloc[-1]
         
-        # 1. 상단 요약 카드
         col1, col2, col3, col4 = st.columns(4)
         if usdt_total is not None:
             col1.metric("총 보유 자산 (USDT)", f"${usdt_total:,.2f}")
@@ -178,7 +177,6 @@ if mode == "🤖 실시간 자동매매 모니터링":
 
         st.markdown("---")
 
-        # 2. ver_2 AI 모델 예측 섹션
         st.subheader("🎯 ver_2 AI 모델 실시간 예측 분석")
         current_feat = raw_df.iloc[-1]
         features = ['Returns', 'Body_Size', 'Upper_Shadow', 'Lower_Shadow', 
@@ -220,7 +218,6 @@ if mode == "🤖 실시간 자동매매 모니터링":
 
         st.markdown("---")
 
-        # 3. 차트 & 포지션 상세
         col_chart, col_info = st.columns([2.8, 1.2])
 
         df_chart = raw_df.reset_index()
@@ -270,8 +267,9 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
     start_date = st.sidebar.date_input("시뮬레이션 시작일", min_value=min_date, max_value=max_date, value=min_date)
 
     st.sidebar.header("⚙️ ver_2 매매 파라미터")
-    entry_th = st.sidebar.slider("진입 임계점 (Entry Threshold)", min_value=0.3, max_value=0.9, value=0.45, step=0.01)
-    exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.3, max_value=0.9, value=0.45, step=0.01)
+    # 진입 및 청산 임계점 범위를 0.10 ~ 0.90으로 확장
+    entry_th = st.sidebar.slider("진입 임계점 (Entry Threshold)", min_value=0.10, max_value=0.90, value=0.45, step=0.01)
+    exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.10, max_value=0.90, value=0.45, step=0.01)
 
     st.sidebar.markdown("---")
     leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 25)
@@ -282,7 +280,6 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
     use_rsi_exit = st.sidebar.checkbox("RSI 초과 포지션 종료 적용", value=True)
     if use_rsi_exit:
         rsi_long_th = st.sidebar.slider("RSI 롱(Long) 청산 수치", min_value=50, max_value=95, value=90, step=1)
-        # RSI 숏 청산 수치 범위를 0~20까지 설정
         rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치", min_value=0, max_value=20, value=10, step=1)
     else:
         rsi_long_th, rsi_short_th = 90, 10
