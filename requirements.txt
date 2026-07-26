@@ -6,3 +6,7 @@ xgboost
 scikit-learn
 plotly
 joblib
+ccxt
+ta
+python-dotenv
+schedule

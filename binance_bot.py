@@ -1,6 +1,7 @@
 import ccxt
 import pandas as pd
 import numpy as np
+import ta
 import joblib
 import os
 import time
@@ -22,11 +23,17 @@ EXIT_TH = 0.45
 RSI_LONG_EXIT = 90
 RSI_SHORT_EXIT = 10
 
-# 모델 로드
-MODEL_PATH = 'xgboost_btc_15m_3class_strict.pkl'
+# ver_2 모델 로드
+MODEL_PATH = 'xgboost_btc_15m_v2_advanced.pkl'
 if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"{MODEL_PATH} 파일을 찾을 수 없습니다. 스크립트를 같은 폴더에서 실행해주세요.")
+    # ver_2 디렉토리 경로도 확인
+    if os.path.exists(os.path.join('ver_2', 'models', MODEL_PATH)):
+        MODEL_PATH = os.path.join('ver_2', 'models', MODEL_PATH)
+    else:
+        raise FileNotFoundError(f"{MODEL_PATH} 파일을 찾을 수 없습니다.")
+
 model = joblib.load(MODEL_PATH)
+print(f"✅ ver_2 모델 로드 완료: {MODEL_PATH}")
 
 # 바이낸스 선물 객체 초기화
 exchange = ccxt.binanceusdm({
@@ -39,43 +46,50 @@ exchange = ccxt.binanceusdm({
 })
 
 def set_leverage_and_margin():
-    # 1. 레버리지 설정
     try:
         exchange.set_leverage(LEVERAGE, SYMBOL)
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 레버리지 {LEVERAGE}배 설정 완료")
     except Exception as e:
-        print(f"레버리지 설정 오류 (이미 설정되었을 수 있음): {e}")
+        print(f"레버리지 설정 예외/확인: {e}")
 
-    # 2. 격리(ISOLATED) 마진 모드 설정
     try:
         exchange.set_margin_mode('ISOLATED', SYMBOL)
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 마진 모드: 격리(ISOLATED) 설정 완료")
     except Exception as e:
-        # 이미 격리 모드로 설정되어 있으면 바이낸스 API가 에러를 반환하므로 예외 처리합니다.
-        print(f"마진 모드 설정 완료 혹은 확인 필요 (이미 격리 상태일 수 있음): {e}")
+        print(f"마진 모드 설정 예외/확인: {e}")
 
 def get_recent_data():
-    # 24시간 이동평균(96개 캔들)을 위해 120개 정도의 캔들을 가져옵니다.
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=120)
+    # ver_2 기술적 지표 및 MTF 지표 계산을 위해 150개 캔들 수집
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=150)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
     
-    # 지표 계산
+    # ver_2 피처 엔지니어링 (정상성 변환, ta 패키지, MTF)
     df['Returns'] = df['Close'].pct_change()
-    df['SMA_7'] = df['Close'].rolling(window=7).mean()
-
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df['RSI_14'] = 100 - (100 / (1 + gain / loss))
-
-    df['SMA_1H'] = df['Close'].rolling(window=4).mean()
-    df['SMA_4H'] = df['Close'].rolling(window=16).mean()
-    df['Vol_4H'] = df['Returns'].rolling(window=16).std()
-    df['SMA_24H'] = df['Close'].rolling(window=96).mean()
-
-    df['BB_Std'] = df['Close'].rolling(window=20).std()
-    df['BB_Width'] = (df['BB_Std'] * 4) / df['Close'].rolling(window=20).mean()
+    df['Body_Size'] = (df['Close'] - df['Open']) / df['Open']
+    df['Upper_Shadow'] = (df['High'] - df[['Open', 'Close']].max(axis=1)) / df['Close']
+    df['Lower_Shadow'] = (df[['Open', 'Close']].min(axis=1) - df['Low']) / df['Close']
+    
+    df['RSI_14'] = ta.momentum.rsi(df['Close'], window=14) / 100.0
+    df['ATR_14'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14)
+    df['ATR_Ratio'] = df['ATR_14'] / df['Close']
+    
+    sma_20 = ta.trend.sma_indicator(df['Close'], window=20)
+    df['Close_vs_SMA20'] = df['Close'] / sma_20 - 1
+    
+    bb_high = ta.volatility.bollinger_hband(df['Close'], window=20)
+    bb_low = ta.volatility.bollinger_lband(df['Close'], window=20)
+    df['BB_Width'] = (bb_high - bb_low) / sma_20
+    df['BB_Pos'] = (df['Close'] - bb_low) / (bb_high - bb_low + 1e-8)
+    
+    # MTF 1시간봉 지표
+    df_1h = df['Close'].resample('1h').last().to_frame(name='Close_1H')
+    sma_20_1h = ta.trend.sma_indicator(df_1h['Close_1H'], window=20)
+    df_1h['Close_vs_SMA20_1H'] = df_1h['Close_1H'] / sma_20_1h - 1
+    
+    df = df.join(df_1h[['Close_vs_SMA20_1H']], how='left')
+    df['Close_vs_SMA20_1H'] = df['Close_vs_SMA20_1H'].ffill()
 
     df.dropna(inplace=True)
     return df
@@ -97,16 +111,14 @@ def get_current_position():
 def get_usdt_balance():
     try:
         balance = exchange.fetch_balance()
-        # USDT가 아예 없는 경우 KeyError가 발생하지 않도록 get() 사용
         return float(balance['total'].get('USDT', 0.0))
     except Exception as e:
         print(f"잔고 조회 오류: {e}")
         return 0.0
 
 def execute_trade():
-    print(f"\n--- [{time.strftime('%Y-%m-%d %H:%M:%S')}] 15분봉 체크 시작 ---")
+    print(f"\n--- [{time.strftime('%Y-%m-%d %H:%M:%S')}] ver_2 모델 15분봉 체크 시작 ---")
     try:
-        # 실시간 잔액 및 포지션 상태 조회 및 출력
         balance = get_usdt_balance()
         position, pos_size, avg_entry_price = get_current_position()
         
@@ -123,102 +135,91 @@ def execute_trade():
         df = get_recent_data()
         current_data = df.iloc[-1]
         
-        features = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_7', 'RSI_14', 'SMA_1H', 'SMA_4H', 'Vol_4H', 'SMA_24H', 'BB_Width']
+        features = ['Returns', 'Body_Size', 'Upper_Shadow', 'Lower_Shadow', 
+                    'RSI_14', 'ATR_Ratio', 'Close_vs_SMA20', 'BB_Width', 'BB_Pos', 'Close_vs_SMA20_1H']
         X = current_data[features].values.reshape(1, -1)
         
-        # 모델 예측
+        # ver_2 모델 예측
         probs = model.predict_proba(X)
         max_prob = np.max(probs, axis=1)[0]
         pred = np.argmax(probs, axis=1)[0] # 0: Short, 1: Hold, 2: Long
         
-        rsi = current_data['RSI_14']
+        rsi = current_data['RSI_14'] * 100.0  # 스케일 변환
         close_price = current_data['Close']
         
-        print(f"현재 가격: {close_price}, RSI: {rsi:.2f}")
-        print(f"예측결과: {'Long' if pred==2 else 'Short' if pred==0 else 'Hold'} (확률: {max_prob:.2f})")
+        print(f"현재 가격: ${close_price:,.2f}, RSI: {rsi:.2f}")
+        print(f"ver_2 AI 예측: {'Long' if pred==2 else 'Short' if pred==0 else 'Hold'} (확률: {max_prob*100:.1f}%)")
         
         position, pos_size, avg_entry_price = get_current_position()
         
-        # 1. RSI 기반 강제 청산 (포지션이 있을 때)
+        # 1. RSI 기반 강제 청산
         if position == 1 and rsi >= RSI_LONG_EXIT:
-            print("🚨 RSI 롱 청산 조건 도달 (과매수). 포지션 종료합니다.")
+            print("🚨 RSI 롱 과매수 청산 조건 도달. 포지션을 종료합니다.")
             exchange.create_market_sell_order(SYMBOL, pos_size, params={'reduceOnly': True})
             return
         elif position == -1 and rsi <= RSI_SHORT_EXIT:
-            print("🚨 RSI 숏 청산 조건 도달 (과매도). 포지션 종료합니다.")
+            print("🚨 RSI 숏 과매도 청산 조건 도달. 포지션을 종료합니다.")
             exchange.create_market_buy_order(SYMBOL, pos_size, params={'reduceOnly': True})
             return
             
-        # 2. 신호에 의한 포지션 종료
+        # 2. 신호에 의한 반대 포지션 종료
         if position != 0:
             if (position == 1 and pred == 0) or (position == -1 and pred == 2):
                 if max_prob >= EXIT_TH:
-                    print("🔄 반대 신호 강도 도달. 기존 포지션을 종료합니다.")
+                    print("🔄 반대 신호 감지. 기존 포지션을 종료합니다.")
                     if position == 1:
                         exchange.create_market_sell_order(SYMBOL, pos_size, params={'reduceOnly': True})
                     else:
                         exchange.create_market_buy_order(SYMBOL, pos_size, params={'reduceOnly': True})
-                    position = 0 # 청산 후 새로운 진입 여부 체크
+                    position = 0
                     time.sleep(2)
             
-            # 2.5 물타기 (추가 진입) 로직
+            # 물타기(추가 진입)
             else:
                 is_loss = (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
                 if (position == 1 and pred == 2) or (position == -1 and pred == 0):
                     if max_prob >= ENTRY_TH and is_loss:
                         balance = get_usdt_balance()
-                        # 물타기 증거금 (총 잔고의 25%)
                         add_margin = balance * INVEST_RATIO
-                        # 실제 추가 주문 수량 계산 (레버리지 반영)
                         add_size = (add_margin * LEVERAGE) / close_price
                         
-                        print(f"🌊 [물타기 조건 도달] 평단가: ${avg_entry_price:.2f}, 현재가: ${close_price:.2f} (손실중)")
-                        print(f"추가 증거금: {add_margin:.2f} USDT, 추가 수량: {add_size:.4f}")
-                        
-                        if position == 1: # Long 추매
+                        print(f"🌊 [물타기 조건 도달] 평단가: ${avg_entry_price:.2f}, 현재가: ${close_price:.2f}")
+                        if position == 1:
                             exchange.create_market_buy_order(SYMBOL, add_size)
-                            print("✅ Long 추가 진입(물타기) 완료")
-                        else: # Short 추매
+                            print("✅ Long 추가 진입 완료")
+                        else:
                             exchange.create_market_sell_order(SYMBOL, add_size)
-                            print("✅ Short 추가 진입(물타기) 완료")
+                            print("✅ Short 추가 진입 완료")
                         time.sleep(2)
-                        return # 물타기를 한 차례 한 뒤에는 이번 15분봉 체크 종료
+                        return
         
-        # 3. 신규 진입 로직
+        # 3. 신규 진입
         if position == 0:
-            if max_prob >= ENTRY_TH:
-                # 0: Short, 2: Long 일 때만 진입하고, 1: Hold 일 때는 진입하지 않음
-                if pred in [0, 2]:
-                    balance = get_usdt_balance()
-                    # 진입 증거금 (사용자 설정 비율)
-                    margin_to_use = balance * INVEST_RATIO
-                    # 실제 매수 사이즈 (레버리지 적용)
-                    target_size = (margin_to_use * LEVERAGE) / close_price
-                    
-                    print(f"🚀 신규 진입 조건 도달! 증거금: {margin_to_use:.2f} USDT, 주문 수량: {target_size:.4f}")
-                    if pred == 2: # Long
-                        exchange.create_market_buy_order(SYMBOL, target_size)
-                        print("✅ Long 진입 완료")
-                    elif pred == 0: # Short
-                        exchange.create_market_sell_order(SYMBOL, target_size)
-                        print("✅ Short 진입 완료")
+            if max_prob >= ENTRY_TH and pred in [0, 2]:
+                balance = get_usdt_balance()
+                margin_to_use = balance * INVEST_RATIO
+                target_size = (margin_to_use * LEVERAGE) / close_price
+                
+                print(f"🚀 ver_2 신규 진입 신호! 증거금: {margin_to_use:.2f} USDT, 수량: {target_size:.4f}")
+                if pred == 2:
+                    exchange.create_market_buy_order(SYMBOL, target_size)
+                    print("✅ Long 진입 완료")
+                elif pred == 0:
+                    exchange.create_market_sell_order(SYMBOL, target_size)
+                    print("✅ Short 진입 완료")
 
     except Exception as e:
         print(f"오류 발생: {e}")
 
 if __name__ == "__main__":
-    print("=== 바이낸스 AI 15분봉 자동매매 봇 시작 ===")
+    print("=== ver_2 비트코인 AI 선물 자동매매 봇 시작 ===")
     if not API_KEY or not SECRET_KEY:
         print("⚠️ 환경 변수(API_KEY, SECRET_KEY)가 설정되지 않았습니다. .env 파일을 확인해주세요.")
         exit(1)
         
     set_leverage_and_margin()
-    
-    # 즉시 1회 실행
     execute_trade()
     
-    # 15분마다 정각 (00, 15, 30, 45분)에 실행하도록 설정
-    # Binance의 15m 캔들 종가 마감 직후에 실행하기 위해 매시 00, 15, 30, 45분에 동작
     schedule.every().hour.at(":00").do(execute_trade)
     schedule.every().hour.at(":15").do(execute_trade)
     schedule.every().hour.at(":30").do(execute_trade)
