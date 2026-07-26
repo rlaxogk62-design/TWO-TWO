@@ -5,6 +5,7 @@ import numpy as np
 import ta
 import joblib
 import os
+import json
 import time
 import schedule
 from dotenv import load_dotenv
@@ -20,15 +21,36 @@ load_dotenv(os.path.join(BASE_DIR, '.env'))
 API_KEY = os.getenv('BINANCE_API_KEY')
 SECRET_KEY = os.getenv('BINANCE_SECRET_KEY')
 
-# 사용자 설정 파라미터
+# ==========================================
+# 사용자 설정 파라미터 (최적 파라미터 조합 적용)
+# ==========================================
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '15m'
-LEVERAGE = 25
-INVEST_RATIO = 0.25 # 25%
-ENTRY_TH = 0.45
-EXIT_TH = 0.45
-RSI_LONG_EXIT = 90
-RSI_SHORT_EXIT = 10
+LEVERAGE = 25          # 레버리지 25배
+INVEST_RATIO = 0.25    # 1회 진입 비중 25%
+ENTRY_TH = 0.42        # 진입 임계점 0.42
+EXIT_TH = 0.40         # 청산 임계점 0.40
+MAX_PYRAMID = 3        # 최대 물타기 허용 횟수 3회
+RSI_LONG_EXIT = 90     # RSI 롱 청산 90
+RSI_SHORT_EXIT = 10    # RSI 숏 청산 10
+
+STATE_FILE = os.path.join(BASE_DIR, 'pyramid_state.json')
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {'pyramid_count': 0}
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"상태 저장 오류: {e}")
 
 # ver_2 모델 로드
 MODEL_PATH = os.path.join(BASE_DIR, 'xgboost_btc_15m_v2_advanced.pkl')
@@ -101,23 +123,22 @@ def get_recent_data():
     return df
 
 def get_current_position():
-    positions = exchange.fetch_positions([SYMBOL])
-    for p in positions:
-        if p['symbol'] == SYMBOL:
-            size = float(p['contracts']) if p['contracts'] else 0.0
-            side = p['side']
-            entry_price = float(p['entryPrice']) if p['entryPrice'] else 0.0
-            if size > 0:
-                if side == 'long':
-                    return 1, size, entry_price
-                elif side == 'short':
-                    return -1, size, entry_price
+    try:
+        raw_positions = exchange.fapiPrivateV2GetPositionRisk({'symbol': 'BTCUSDT'})
+        for p in raw_positions:
+            amt = float(p.get('positionAmt', 0))
+            if amt != 0:
+                entry_price = float(p.get('entryPrice', 0))
+                side = 1 if amt > 0 else -1
+                return side, abs(amt), entry_price
+    except Exception as e:
+        print(f"포지션 조회 오류: {e}")
     return 0, 0.0, 0.0
 
 def get_usdt_balance():
     try:
-        balance = exchange.fetch_balance()
-        return float(balance['total'].get('USDT', 0.0))
+        account_info = exchange.fapiPrivateV2GetAccount()
+        return float(account_info.get('availableBalance', 0.0))
     except Exception as e:
         print(f"잔고 조회 오류: {e}")
         return 0.0
@@ -127,14 +148,21 @@ def execute_trade():
     try:
         balance = get_usdt_balance()
         position, pos_size, avg_entry_price = get_current_position()
+        state = load_state()
+        pyramid_count = state.get('pyramid_count', 0)
         
+        # 포지션이 없으면 물타기 카운트 리셋
+        if position == 0:
+            pyramid_count = 0
+            save_state({'pyramid_count': 0})
+
         pos_text = "없음"
         if position == 1:
-            pos_text = f"LONG ({pos_size} BTC)"
+            pos_text = f"LONG ({pos_size} BTC) | 물타기 진행: {pyramid_count}/{MAX_PYRAMID}회"
         elif position == -1:
-            pos_text = f"SHORT ({pos_size} BTC)"
+            pos_text = f"SHORT ({pos_size} BTC) | 물타기 진행: {pyramid_count}/{MAX_PYRAMID}회"
             
-        print(f"💰 현재 선물 잔액: {balance:.2f} USDT")
+        print(f"💰 사용 가능 선물 잔액: {balance:.2f} USDT")
         print(f"📊 현재 포지션 상태: {pos_text}")
         print("-" * 40)
 
@@ -156,16 +184,16 @@ def execute_trade():
         print(f"현재 가격: ${close_price:,.2f}, RSI: {rsi:.2f}")
         print(f"ver_2 AI 예측: {'Long' if pred==2 else 'Short' if pred==0 else 'Hold'} (확률: {max_prob*100:.1f}%)")
         
-        position, pos_size, avg_entry_price = get_current_position()
-        
         # 1. RSI 기반 강제 청산
         if position == 1 and rsi >= RSI_LONG_EXIT:
             print("🚨 RSI 롱 과매수 청산 조건 도달. 포지션을 종료합니다.")
             exchange.create_market_sell_order(SYMBOL, pos_size, params={'reduceOnly': True})
+            save_state({'pyramid_count': 0})
             return
         elif position == -1 and rsi <= RSI_SHORT_EXIT:
             print("🚨 RSI 숏 과매도 청산 조건 도달. 포지션을 종료합니다.")
             exchange.create_market_buy_order(SYMBOL, pos_size, params={'reduceOnly': True})
+            save_state({'pyramid_count': 0})
             return
             
         # 2. 신호에 의한 반대 포지션 종료
@@ -178,18 +206,21 @@ def execute_trade():
                     else:
                         exchange.create_market_buy_order(SYMBOL, pos_size, params={'reduceOnly': True})
                     position = 0
+                    save_state({'pyramid_count': 0})
                     time.sleep(2)
             
-            # 물타기(추가 진입)
+            # 3. 물타기(추가 진입) 로직 (최대 3회 제한 검사)
             else:
                 is_loss = (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
                 if (position == 1 and pred == 2) or (position == -1 and pred == 0):
-                    if max_prob >= ENTRY_TH and is_loss:
-                        balance = get_usdt_balance()
-                        add_margin = balance * INVEST_RATIO
-                        add_size = (add_margin * LEVERAGE) / close_price
+                    if max_prob >= ENTRY_TH and is_loss and pyramid_count < MAX_PYRAMID:
+                        margin_to_use = balance * INVEST_RATIO
+                        add_size = (margin_to_use * LEVERAGE) / close_price
                         
-                        print(f"🌊 [물타기 조건 도달] 평단가: ${avg_entry_price:.2f}, 현재가: ${close_price:.2f}")
+                        pyramid_count += 1
+                        save_state({'pyramid_count': pyramid_count})
+                        
+                        print(f"🌊 [물타기 {pyramid_count}/{MAX_PYRAMID}회 도달] 평단가: ${avg_entry_price:.2f}, 현재가: ${close_price:.2f}")
                         if position == 1:
                             exchange.create_market_buy_order(SYMBOL, add_size)
                             print("✅ Long 추가 진입 완료")
@@ -198,21 +229,23 @@ def execute_trade():
                             print("✅ Short 추가 진입 완료")
                         time.sleep(2)
                         return
+                    elif pyramid_count >= MAX_PYRAMID:
+                        print(f"⚠️ 물타기 최대 허용 횟수({MAX_PYRAMID}회)에 도달하여 추가 진입하지 않습니다.")
         
-        # 3. 신규 진입
+        # 4. 신규 진입 로직
         if position == 0:
             if max_prob >= ENTRY_TH and pred in [0, 2]:
-                balance = get_usdt_balance()
                 margin_to_use = balance * INVEST_RATIO
                 target_size = (margin_to_use * LEVERAGE) / close_price
                 
                 print(f"🚀 ver_2 신규 진입 신호! 증거금: {margin_to_use:.2f} USDT, 수량: {target_size:.4f}")
+                save_state({'pyramid_count': 0})
                 if pred == 2:
                     exchange.create_market_buy_order(SYMBOL, target_size)
-                    print("✅ Long 진입 완료")
+                    print("✅ Long 신규 진입 완료")
                 elif pred == 0:
                     exchange.create_market_sell_order(SYMBOL, target_size)
-                    print("✅ Short 진입 완료")
+                    print("✅ Short 신규 진입 완료")
 
     except Exception as e:
         print(f"오류 발생: {e}")

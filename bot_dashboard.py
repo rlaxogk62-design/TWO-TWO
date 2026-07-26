@@ -253,7 +253,7 @@ if mode == "🤖 실시간 자동매매 모니터링":
                 * **추정 청산가:** `${pos_data['liquidationPrice']:,.2f}`
                 """)
             else:
-                st.warning("현재 진입한 포지션이 없습니다.\n\nAI가 45% 이상의 확실한 신호를 기다리고 있습니다.")
+                st.warning("현재 진입한 포지션이 없습니다.\n\nAI가 42% 이상의 확실한 신호를 기다리고 있습니다.")
 
         if st.button("🔄 실시간 데이터 새로고침"):
             st.rerun()
@@ -267,9 +267,8 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
     start_date = st.sidebar.date_input("시뮬레이션 시작일", min_value=min_date, max_value=max_date, value=min_date)
 
     st.sidebar.header("⚙️ ver_2 매매 파라미터")
-    # 진입 및 청산 임계점 범위를 0.10 ~ 0.90으로 확장
-    entry_th = st.sidebar.slider("진입 임계점 (Entry Threshold)", min_value=0.10, max_value=0.90, value=0.45, step=0.01)
-    exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.10, max_value=0.90, value=0.45, step=0.01)
+    entry_th = st.sidebar.slider("진입 임계점 (Entry Threshold)", min_value=0.10, max_value=0.90, value=0.42, step=0.01)
+    exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.10, max_value=0.90, value=0.40, step=0.01)
 
     st.sidebar.markdown("---")
     leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 25)
@@ -337,14 +336,14 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
                         invested_margin = balance * invest_ratio
                         position_size = invested_margin * leverage
                         pyramid_count = 0
-                        trades.append({'date': date, 'type': 'Long 진입', 'price': close_price, 'profit': 0.0})
+                        trades.append({'date': date, 'type': 'Long 신규진입', 'price': close_price, 'profit': 0.0})
                     elif pred == 0:
                         position = -1
                         avg_entry_price = close_price
                         invested_margin = balance * invest_ratio
                         position_size = invested_margin * leverage
                         pyramid_count = 0
-                        trades.append({'date': date, 'type': 'Short 진입', 'price': close_price, 'profit': 0.0})
+                        trades.append({'date': date, 'type': 'Short 신규진입', 'price': close_price, 'profit': 0.0})
             else:
                 if (position == 1 and pred == 0) or (position == -1 and pred == 2):
                     if prob >= exit_th:
@@ -382,10 +381,15 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
         hist, trades = run_backtest(df_sub, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th)
         df_sub['Balance'] = hist
 
-        col1, col2, col3 = st.columns(3)
+        # 신규 포지션 진입 건수와 추가 물타기 건수 명확한 분리 표기
+        initial_entries = len([t for t in trades if '신규진입' in t['type']])
+        pyramid_entries = len([t for t in trades if '물타기' in t['type']])
+
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("초기 자본금", "$10,000.00")
         col2.metric("최종 자산", f"${hist[-1]:,.2f}", f"{(hist[-1]/10000 - 1)*100:.2f}%")
-        col3.metric("총 거래 횟수", f"{len([t for t in trades if '진입' in t['type']])} 회 진입")
+        col3.metric("독립 신규 포지션 수", f"{initial_entries}회")
+        col4.metric("총 매매 주문 수 (물타기 포함)", f"{initial_entries + pyramid_entries}회", f"추가 물타기 {pyramid_entries}회 포함")
 
         st.subheader("💰 백테스트 누적 자산 변화 (ver_2 모델)")
         fig_bal = go.Figure()
@@ -401,8 +405,8 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
         )])
 
         margin = (df_sub['High'].max() - df_sub['Low'].min()) * 0.02
-        long_entries = [t for t in trades if t['type'] == 'Long 진입']
-        short_entries = [t for t in trades if t['type'] == 'Short 진입']
+        long_entries = [t for t in trades if t['type'] == 'Long 신규진입']
+        short_entries = [t for t in trades if t['type'] == 'Short 신규진입']
         add_margins = [t for t in trades if '물타기' in t['type']]
         model_exits = [t for t in trades if t['type'] == '신호 포지션 종료']
         rsi_exits = [t for t in trades if t['type'] == 'RSI 초과 포지션 종료']
@@ -410,13 +414,13 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
 
         if long_entries:
             fig_candle.add_trace(go.Scatter(x=[t['date'] for t in long_entries], y=[t['price'] - margin for t in long_entries],
-                                            mode='markers', marker=dict(symbol='triangle-up', size=12, color='lime', line=dict(width=1, color='darkgreen')), name='Long 진입'))
+                                            mode='markers', marker=dict(symbol='triangle-up', size=12, color='lime', line=dict(width=1, color='darkgreen')), name='Long 신규진입'))
         if short_entries:
             fig_candle.add_trace(go.Scatter(x=[t['date'] for t in short_entries], y=[t['price'] + margin for t in short_entries],
-                                            mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='darkred')), name='Short 진입'))
+                                            mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='darkred')), name='Short 신규진입'))
         if add_margins:
             fig_candle.add_trace(go.Scatter(x=[t['date'] for t in add_margins], y=[t['price'] for t in add_margins],
-                                            mode='markers', marker=dict(symbol='star', size=10, color='blue'), name='물타기'))
+                                            mode='markers', marker=dict(symbol='star', size=10, color='blue'), name='물타기 (추가진입)'))
         if model_exits:
             fig_candle.add_trace(go.Scatter(x=[t['date'] for t in model_exits], y=[t['price'] for t in model_exits],
                                             mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='신호 포지션 종료'))
