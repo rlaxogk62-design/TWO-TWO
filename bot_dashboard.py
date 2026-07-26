@@ -55,19 +55,34 @@ def fetch_live_data():
         usdt_total = float(account_info.get('totalWalletBalance', 0.0))
         usdt_free = float(account_info.get('availableBalance', 0.0))
         
-        # 포지션 정밀 조회 (LONG / SHORT 정밀 판별)
+        # 포지션 정밀 조회 (fapiPrivateV2GetPositionRisk)
         pos_data = None
         raw_positions = exchange.fapiPrivateV2GetPositionRisk({'symbol': 'BTCUSDT'})
         for p in raw_positions:
             amt = float(p.get('positionAmt', 0))
             if amt != 0:
+                entry_price = float(p.get('entryPrice', 0))
+                unrealized_pnl = float(p.get('unRealizedProfit', 0))
+                leverage = int(p.get('leverage', 25))
+                contracts = abs(amt)
+                
+                # 투입 증거금 (Initial Margin) & 포지션 가치 (Notional Value)
+                notional_value = contracts * entry_price
+                initial_margin = notional_value / leverage if leverage > 0 else 0.0
+                pnl_roe = (unrealized_pnl / initial_margin * 100.0) if initial_margin > 0 else 0.0
+                liquidation_price = float(p.get('liquidationPrice', 0))
+
                 pos_data = {
                     'symbol': 'BTC/USDT',
                     'side': 'LONG' if amt > 0 else 'SHORT',
-                    'contracts': abs(amt),
-                    'entryPrice': float(p.get('entryPrice', 0)),
-                    'unrealizedPnl': float(p.get('unRealizedProfit', 0)),
-                    'leverage': int(p.get('leverage', 25))
+                    'contracts': contracts,
+                    'entryPrice': entry_price,
+                    'unrealizedPnl': unrealized_pnl,
+                    'pnlRoe': pnl_roe,
+                    'leverage': leverage,
+                    'initialMargin': initial_margin,
+                    'notionalValue': notional_value,
+                    'liquidationPrice': liquidation_price
                 }
                 break
                 
@@ -126,14 +141,13 @@ if df_chart is not None:
     col3.metric("현재 비트코인 가격", f"${current_price:,.2f}")
     
     if pos_data:
-        side = pos_data['side'].upper()
-        size = float(pos_data['contracts'])
-        entry_price = float(pos_data['entryPrice'])
-        unrealized_pnl = float(pos_data['unrealizedPnl'])
+        side = pos_data['side']
+        unrealized_pnl = pos_data['unrealizedPnl']
+        pnl_roe = pos_data['pnlRoe']
         leverage = pos_data['leverage']
         
         color = "normal" if unrealized_pnl >= 0 else "inverse"
-        col4.metric(f"포지션: {side} ({leverage}x)", f"${unrealized_pnl:,.2f} 수익중", delta_color=color)
+        col4.metric(f"포지션: {side} ({leverage}x)", f"${unrealized_pnl:,.2f} ({pnl_roe:+.2f}%)", delta_color=color)
     else:
         col4.metric("현재 포지션", "없음 (대기중)")
 
@@ -190,9 +204,9 @@ if df_chart is not None:
     st.markdown("---")
 
     # =========================================
-    # 3. 실시간 15분봉 차트 & 포지션 정보
+    # 3. 실시간 15분봉 차트 & 포지션 상세 내역
     # =========================================
-    col_chart, col_info = st.columns([3, 1])
+    col_chart, col_info = st.columns([2.8, 1.2])
 
     with col_chart:
         st.subheader("📊 실시간 15분봉 차트")
@@ -203,22 +217,29 @@ if df_chart is not None:
         )])
         
         if pos_data:
-            line_color = "lime" if side == "LONG" else "red"
-            fig.add_hline(y=entry_price, line_dash="dash", line_color=line_color, 
-                          annotation_text=f"{side} 진입가: ${entry_price:,.2f}")
+            line_color = "lime" if pos_data['side'] == "LONG" else "red"
+            fig.add_hline(y=pos_data['entryPrice'], line_dash="dash", line_color=line_color, 
+                          annotation_text=f"{pos_data['side']} 진입평단: ${pos_data['entryPrice']:,.2f}")
             
-        fig.update_layout(template='plotly_dark', height=450, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=30, b=0))
+        fig.update_layout(template='plotly_dark', height=520, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, use_container_width=True)
 
     with col_info:
-        st.subheader("💡 포지션 상세")
+        st.subheader("💡 포지션 상세 정보")
         if pos_data:
-            st.info(f"**방향:** {side}\n\n"
-                    f"**수량:** {size} BTC\n\n"
-                    f"**진입가:** ${entry_price:,.2f}\n\n"
-                    f"**현재가:** ${current_price:,.2f}\n\n"
-                    f"**레버리지:** {leverage}배\n\n"
-                    f"**미실현 손익:** ${unrealized_pnl:,.2f}")
+            side_badge = "🔴 SHORT (하락 배팅)" if pos_data['side'] == "SHORT" else "🟢 LONG (상승 배팅)"
+            
+            st.markdown(f"#### {side_badge}")
+            st.markdown(f"""
+            * **레버리지:** `{pos_data['leverage']}x` (격리)
+            * **계약 수량:** `{pos_data['contracts']:.3f} BTC`
+            * **진입 평단가:** `${pos_data['entryPrice']:,.2f}`
+            * **현재가:** `${current_price:,.2f}`
+            * **총 포지션 가치 (Notional):** `${pos_data['notionalValue']:,.2f} USDT`
+            * **실제 투입 증거금 (Margin):** `${pos_data['initialMargin']:,.2f} USDT`
+            * **미실현 손익 (PnL):** `${pos_data['unrealizedPnl']:,.2f} USDT` (`{pos_data['pnlRoe']:+.2f}%`)
+            * **추정 청산가:** `${pos_data['liquidationPrice']:,.2f}`
+            """)
         else:
             st.warning("현재 진입한 포지션이 없습니다.\n\nAI가 45% 이상의 확실한 신호를 기다리고 있습니다.")
             

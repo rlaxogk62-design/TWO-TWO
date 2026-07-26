@@ -81,14 +81,15 @@ def get_candle_data():
     return df
 
 # ==========================================
-# 3. 백테스트 시뮬레이션 로직
+# 3. 백테스트 시뮬레이션 로직 (최대 물타기 횟수 제한 적용)
 # ==========================================
-def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rsi_long_th=90, rsi_short_th=10):
+def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th=90, rsi_short_th=10):
     balance = 10000.0
     position = 0
     avg_entry_price = 0.0
     invested_margin = 0.0
     position_size = 0.0
+    pyramid_count = 0  # 물타기 횟수 추적
     fee_rate = 0.0004  # 바이낸스 선물 수수료 (0.04% Taker)
 
     balance_history = []
@@ -96,7 +97,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
 
     for i in range(len(df)):
         close_price = df['Close'].iloc[i]
-        rsi = df['RSI_14'].iloc[i] * 100.0  # 표시용 0~100 스케일
+        rsi = df['RSI_14'].iloc[i] * 100.0
         prob = df['Max_Prob'].iloc[i]
         pred = df['Pred'].iloc[i]
         date = df.index[i]
@@ -113,7 +114,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
             if net_profit <= -invested_margin:
                 trades.append({'date': date, 'type': '마진콜 청산', 'price': close_price, 'profit': -invested_margin})
                 balance -= invested_margin
-                position, invested_margin, position_size = 0, 0, 0
+                position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
                 balance_history.append(balance)
                 continue
 
@@ -121,7 +122,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
                 if (position == 1 and rsi >= rsi_long_th) or (position == -1 and rsi <= rsi_short_th):
                     trades.append({'date': date, 'type': 'RSI 초과 포지션 종료', 'price': close_price, 'profit': net_profit})
                     balance += net_profit
-                    position, invested_margin, position_size = 0, 0, 0
+                    position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
                     balance_history.append(max(balance, 0))
                     continue
 
@@ -131,29 +132,38 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
             if prob >= entry_th:
                 if pred == 2:
                     position = 1
-                    avg_entry_price, invested_margin = close_price, balance * invest_ratio
+                    avg_entry_price = close_price
+                    invested_margin = balance * invest_ratio
                     position_size = invested_margin * leverage
+                    pyramid_count = 0
                     trades.append({'date': date, 'type': 'Long 진입', 'price': close_price, 'profit': 0.0})
                 elif pred == 0:
                     position = -1
-                    avg_entry_price, invested_margin = close_price, balance * invest_ratio
+                    avg_entry_price = close_price
+                    invested_margin = balance * invest_ratio
                     position_size = invested_margin * leverage
+                    pyramid_count = 0
                     trades.append({'date': date, 'type': 'Short 진입', 'price': close_price, 'profit': 0.0})
         else:
+            # 포지션 청산 조건
             if (position == 1 and pred == 0) or (position == -1 and pred == 2):
                 if prob >= exit_th:
                     trades.append({'date': date, 'type': '신호 포지션 종료', 'price': close_price, 'profit': net_profit})
                     balance += net_profit
-                    position, invested_margin, position_size = 0, 0, 0
+                    position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
+            
+            # 물타기(추가 진입) 조건: 엄격한 최대 횟수 제한(max_pyramid) 체크
             elif (position == 1 and pred == 2) or (position == -1 and pred == 0):
-                if prob >= entry_th and is_loss and balance > 0:
+                if prob >= entry_th and is_loss and balance > 0 and pyramid_count < max_pyramid:
+                    # 현재 남아있는 사용가능 잔고 또는 총 자산 기반 물타기
                     add_margin = balance * invest_ratio
                     add_size = add_margin * leverage
                     total_size = position_size + add_size
                     avg_entry_price = (position_size * avg_entry_price + add_size * close_price) / total_size
                     invested_margin += add_margin
                     position_size = total_size
-                    trades.append({'date': date, 'type': '물타기', 'price': close_price, 'profit': 0.0})
+                    pyramid_count += 1
+                    trades.append({'date': date, 'type': f'물타기 ({pyramid_count}/{max_pyramid}회)', 'price': close_price, 'profit': 0.0})
 
         balance_history.append(max(balance + (net_profit if position != 0 else 0), 0))
 
@@ -163,7 +173,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
 # 4. Streamlit UI 구성
 # ==========================================
 st.set_page_config(layout="wide", page_title="BTC ver_2 AI 시뮬레이터", page_icon="📈")
-st.title("📈 비트코인 ver_2 AI 선물 시뮬레이터 (도쿄 VPS 바이낸스 전용 데이터)")
+st.title("📈 비트코인 ver_2 AI 선물 시뮬레이터")
 
 model = load_ver2_model()
 raw_df = get_candle_data()
@@ -180,12 +190,13 @@ exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.3, 
 st.sidebar.markdown("---")
 leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 25)
 invest_ratio = st.sidebar.slider("1회 진입 비중 (%)", 1, 50, 25) / 100.0
+max_pyramid = st.sidebar.slider("최대 물타기 허용 횟수", 0, 5, 3)
 
 st.sidebar.markdown("---")
 use_rsi_exit = st.sidebar.checkbox("RSI 초과 포지션 종료 적용", value=True)
 if use_rsi_exit:
     rsi_long_th = st.sidebar.slider("RSI 롱(Long) 청산 수치", min_value=50, max_value=95, value=90, step=1)
-    rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치", min_value=5, max_value=10, value=10, step=1)
+    rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치", min_value=5, max_value=50, value=10, step=1)
 else:
     rsi_long_th, rsi_short_th = 90, 10
 
@@ -202,7 +213,7 @@ else:
     df['Max_Prob'] = np.max(probs, axis=1)
     df['Pred'] = np.argmax(probs, axis=1)
 
-    hist, trades = run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rsi_long_th, rsi_short_th)
+    hist, trades = run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th)
     df['Balance'] = hist
 
     col1, col2, col3 = st.columns(3)
@@ -226,7 +237,7 @@ else:
     margin = (df['High'].max() - df['Low'].min()) * 0.02
     long_entries = [t for t in trades if t['type'] == 'Long 진입']
     short_entries = [t for t in trades if t['type'] == 'Short 진입']
-    add_margins = [t for t in trades if t['type'] == '물타기']
+    add_margins = [t for t in trades if '물타기' in t['type']]
     model_exits = [t for t in trades if t['type'] == '신호 포지션 종료']
     rsi_exits = [t for t in trades if t['type'] == 'RSI 초과 포지션 종료']
     liquidations = [t for t in trades if t['type'] == '마진콜 청산']
