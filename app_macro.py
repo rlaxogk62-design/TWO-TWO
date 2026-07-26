@@ -1,5 +1,5 @@
 import streamlit as st
-import ccxt
+import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -22,24 +22,29 @@ def load_ver2_model():
     return joblib.load(model_path)
 
 # ==========================================
-# 2. 데이터 수집 (바이낸스 선물 우선, 실패시 yfinance 백업) 및 ver_2 피처 전처리
+# 2. 데이터 수집 (도쿄 VPS 프록시 -> 바이낸스 선물, 실패시 yfinance 백업) 및 ver_2 피처 전처리
 # ==========================================
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
 def get_candle_data():
     df = None
     
-    # 1차 시도: 바이낸스 선물 API (ccxt)
+    # 1차 시도: 도쿄 VPS API 프록시 (149.28.23.225:5000)를 통한 바이낸스 선물 데이터 수집
     try:
-        exchange = ccxt.binance({'options': {'defaultType': 'future'}, 'timeout': 5000})
-        symbol = 'BTC/USDT'
-        timeframe = '15m'
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=1500)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        df.index = df.index.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
+        url = 'http://149.28.23.225:5000/klines?symbol=BTC/USDT&timeframe=15m&limit=1500'
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('status') == 'success':
+                ohlcv = data['data']
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                df.index = df.index.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
     except Exception as e:
-        # Streamlit Cloud 미국 IP 지오블록(ExchangeNotAvailable) 발생 시 yfinance로 자동 백업
+        df = None
+
+    # 2차 시도: 만약 도쿄 VPS 연결 실패 시 yfinance 데이터로 백업
+    if df is None or df.empty:
         btc = yf.Ticker("BTC-USD")
         df = btc.history(period="60d", interval="15m")
         if df.index.tz is not None:
@@ -158,7 +163,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, use_rsi_exit, rs
 # 4. Streamlit UI 구성
 # ==========================================
 st.set_page_config(layout="wide", page_title="BTC ver_2 AI 시뮬레이터", page_icon="📈")
-st.title("📈 비트코인 ver_2 AI 선물 시뮬레이터")
+st.title("📈 비트코인 ver_2 AI 선물 시뮬레이터 (도쿄 VPS 바이낸스 전용 데이터)")
 
 model = load_ver2_model()
 raw_df = get_candle_data()
@@ -180,7 +185,7 @@ st.sidebar.markdown("---")
 use_rsi_exit = st.sidebar.checkbox("RSI 초과 포지션 종료 적용", value=True)
 if use_rsi_exit:
     rsi_long_th = st.sidebar.slider("RSI 롱(Long) 청산 수치", min_value=50, max_value=95, value=90, step=1)
-    rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치", min_value=5, max_value=50, value=10, step=1)
+    rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치", min_value=5, max_value=10, value=10, step=1)
 else:
     rsi_long_th, rsi_short_th = 90, 10
 
@@ -212,7 +217,7 @@ else:
     fig_bal.update_layout(template='plotly_dark', height=400, xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified')
     st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
 
-    st.subheader("📈 15분봉 및 ver_2 진입/청산 타점 시각화")
+    st.subheader("📈 바이낸스 선물 15분봉 및 ver_2 진입/청산 타점 시각화")
     fig_candle = go.Figure(data=[go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='BTC Price',
         increasing_line_color='green', decreasing_line_color='red'
