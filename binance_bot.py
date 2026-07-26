@@ -1,3 +1,4 @@
+import sys
 import ccxt
 import pandas as pd
 import numpy as np
@@ -7,6 +8,9 @@ import os
 import time
 import schedule
 from dotenv import load_dotenv
+
+# stdout 라인 버퍼링 설정 (로그 파일 즉시 출력)
+sys.stdout.reconfigure(line_buffering=True)
 
 # 스크립트 기준 절대 경로 설정
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
