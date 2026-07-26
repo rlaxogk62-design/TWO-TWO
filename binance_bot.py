@@ -8,8 +8,11 @@ import time
 import schedule
 from dotenv import load_dotenv
 
+# 스크립트 기준 절대 경로 설정
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # 환경 변수 로드 (.env 파일에 BINANCE_API_KEY, BINANCE_SECRET_KEY 저장 필요)
-load_dotenv()
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 API_KEY = os.getenv('BINANCE_API_KEY')
 SECRET_KEY = os.getenv('BINANCE_SECRET_KEY')
 
@@ -24,11 +27,11 @@ RSI_LONG_EXIT = 90
 RSI_SHORT_EXIT = 10
 
 # ver_2 모델 로드
-MODEL_PATH = 'xgboost_btc_15m_v2_advanced.pkl'
+MODEL_PATH = os.path.join(BASE_DIR, 'xgboost_btc_15m_v2_advanced.pkl')
 if not os.path.exists(MODEL_PATH):
-    # ver_2 디렉토리 경로도 확인
-    if os.path.exists(os.path.join('ver_2', 'models', MODEL_PATH)):
-        MODEL_PATH = os.path.join('ver_2', 'models', MODEL_PATH)
+    alt_path = os.path.join(BASE_DIR, 'ver_2', 'models', 'xgboost_btc_15m_v2_advanced.pkl')
+    if os.path.exists(alt_path):
+        MODEL_PATH = alt_path
     else:
         raise FileNotFoundError(f"{MODEL_PATH} 파일을 찾을 수 없습니다.")
 
@@ -59,13 +62,12 @@ def set_leverage_and_margin():
         print(f"마진 모드 설정 예외/확인: {e}")
 
 def get_recent_data():
-    # ver_2 기술적 지표 및 MTF 지표 계산을 위해 150개 캔들 수집
     ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=150)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     
-    # ver_2 피처 엔지니어링 (정상성 변환, ta 패키지, MTF)
+    # ver_2 피처 엔지니어링
     df['Returns'] = df['Close'].pct_change()
     df['Body_Size'] = (df['Close'] - df['Open']) / df['Open']
     df['Upper_Shadow'] = (df['High'] - df[['Open', 'Close']].max(axis=1)) / df['Close']
@@ -144,7 +146,7 @@ def execute_trade():
         max_prob = np.max(probs, axis=1)[0]
         pred = np.argmax(probs, axis=1)[0] # 0: Short, 1: Hold, 2: Long
         
-        rsi = current_data['RSI_14'] * 100.0  # 스케일 변환
+        rsi = current_data['RSI_14'] * 100.0
         close_price = current_data['Close']
         
         print(f"현재 가격: ${close_price:,.2f}, RSI: {rsi:.2f}")
