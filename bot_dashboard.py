@@ -153,54 +153,52 @@ def fetch_live_monitoring():
     except Exception:
         return None, None, None
 
-# 실제 바이낸스 체결 내역 및 실전 자산 추이 생성
-def fetch_real_trades_and_equity():
+# 실제 바이낸스 체결 내역 및 실전 자산 추이 생성 (미실현 손익 반영)
+def fetch_real_trades_and_equity(pos_data=None):
     if not exchange:
         return [], None
     try:
         raw_trades = exchange.fetch_my_trades('BTC/USDT', limit=100)
         account_info = exchange.fapiPrivateV2GetAccount()
-        current_balance = float(account_info.get('totalWalletBalance', 0.0))
-
-        if not raw_trades:
-            return [], None
+        current_wallet_balance = float(account_info.get('totalWalletBalance', 0.0))
 
         formatted_trades = []
-        sorted_trades = sorted(raw_trades, key=lambda x: x['timestamp'])
+        if raw_trades:
+            sorted_trades = sorted(raw_trades, key=lambda x: x['timestamp'])
 
-        for t in sorted_trades:
-            dt = pd.to_datetime(t['timestamp'], unit='ms')
-            if dt.tz is None:
-                dt = dt.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
-            else:
-                dt = dt.tz_convert('Asia/Seoul').tz_localize(None)
+            for t in sorted_trades:
+                dt = pd.to_datetime(t['timestamp'], unit='ms')
+                if dt.tz is None:
+                    dt = dt.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
+                else:
+                    dt = dt.tz_convert('Asia/Seoul').tz_localize(None)
 
-            side = t.get('side', '').upper()
-            price = float(t.get('price', 0.0))
-            amount = float(t.get('amount', 0.0))
-            info = t.get('info', {})
-            pnl = float(info.get('realizedPnl', 0.0))
-            fee_info = t.get('fee', {})
-            fee = float(fee_info.get('cost', 0.0)) if fee_info else float(info.get('commission', 0.0))
+                side = t.get('side', '').upper()
+                price = float(t.get('price', 0.0))
+                amount = float(t.get('amount', 0.0))
+                info = t.get('info', {})
+                pnl = float(info.get('realizedPnl', 0.0))
+                fee_info = t.get('fee', {})
+                fee = float(fee_info.get('cost', 0.0)) if fee_info else float(info.get('commission', 0.0))
 
-            trade_type = "🟢 매수 (BUY)" if side == "BUY" else "🔴 매도 (SELL)"
-            if pnl != 0:
-                trade_type += f" [청산 PnL: ${pnl:+,.2f}]"
+                trade_type = "🟢 매수 (BUY)" if side == "BUY" else "🔴 매도 (SELL)"
+                if pnl != 0:
+                    trade_type += f" [청산 PnL: ${pnl:+,.2f}]"
 
-            formatted_trades.append({
-                'date': dt,
-                'type': trade_type,
-                'raw_side': side,
-                'price': price,
-                'amount': amount,
-                'pnl': pnl,
-                'fee': fee
-            })
+                formatted_trades.append({
+                    'date': dt,
+                    'type': trade_type,
+                    'raw_side': side,
+                    'price': price,
+                    'amount': amount,
+                    'pnl': pnl,
+                    'fee': fee
+                })
 
         # 실제 계좌 잔고 변화 추이 구성
         equity_records = []
         cum_pnl = sum([tr['pnl'] - tr['fee'] for tr in formatted_trades])
-        start_balance = max(current_balance - cum_pnl, 0.0)
+        start_balance = max(current_wallet_balance - cum_pnl, 0.0)
 
         running_balance = start_balance
         for tr in formatted_trades:
@@ -209,6 +207,16 @@ def fetch_real_trades_and_equity():
                 'date': tr['date'],
                 'Balance': running_balance
             })
+
+        # 현재 시점 (NOW)의 평가 자산 기록 추가 (미실현 손익 반영)
+        now_dt = pd.Timestamp.now()
+        unrealized_pnl = pos_data['unrealizedPnl'] if pos_data else 0.0
+        current_total_equity = current_wallet_balance + unrealized_pnl
+
+        equity_records.append({
+            'date': now_dt,
+            'Balance': current_total_equity
+        })
 
         equity_df = pd.DataFrame(equity_records)
         if not equity_df.empty:
@@ -314,7 +322,7 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use
 # 실시간 바이낸스 모니터링 전용 차트 렌더링
 def render_real_monitoring_charts(df_candle, real_trades, equity_df, pos_data=None, current_balance=100.0):
     # 1. 실제 계좌 누적 자산 변화 차트
-    st.subheader("💰 실제 계좌 누적 자산 변화 (바이낸스 실전 데이터)")
+    st.subheader("💰 실제 계좌 누적 자산 변화 (미실현 손익 반영 평가 자산)")
     fig_bal = go.Figure()
 
     if equity_df is not None and not equity_df.empty:
@@ -553,8 +561,8 @@ if mode == "🤖 실시간 자동매매 모니터링":
 
         st.markdown("---")
 
-        # 4. 실제 바이낸스 체결 내역 및 실전 계좌 잔고 추이 시각화
-        real_trades, equity_df = fetch_real_trades_and_equity()
+        # 4. 실제 바이낸스 체결 내역 및 실전 계좌 잔고 추이 시각화 (미실현 손익 포함)
+        real_trades, equity_df = fetch_real_trades_and_equity(pos_data=pos_data)
         curr_bal = usdt_total if usdt_total is not None else 100.0
 
         render_real_monitoring_charts(df_live, real_trades, equity_df, pos_data=pos_data, current_balance=curr_bal)
