@@ -1,7 +1,6 @@
 import streamlit as st
 import ccxt
 import requests
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -59,7 +58,7 @@ def get_exchange():
 exchange = get_exchange()
 SYMBOL = 'BTC/USDT'
 
-# 도쿄 VPS API 또는 yfinance 백업 캔들 수집 (실시간 반영을 위해 ttl=10초 설정)
+# 도쿄 VPS API 또는 바이낸스 선물 직접 캔들 수집 (실시간 반영을 위해 ttl=10초 설정)
 @st.cache_data(ttl=10)
 def get_candle_data():
     df = None
@@ -78,11 +77,15 @@ def get_candle_data():
         df = None
 
     if df is None or df.empty:
-        btc = yf.Ticker("BTC-USD")
-        df = btc.history(period="60d", interval="15m")
-        if df.index.tz is not None:
-            df.index = df.index.tz_convert('Asia/Seoul').tz_localize(None)
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        if exchange:
+            try:
+                ohlcv = exchange.fetch_ohlcv(SYMBOL, '15m', limit=1500)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                df.index = df.index.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
+            except Exception:
+                df = None
 
     # ver_2 피처 엔지니어링
     df['Returns'] = df['Close'].pct_change()
