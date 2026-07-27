@@ -283,8 +283,10 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
     else:
         rsi_long_th, rsi_short_th = 90, 10
 
+    # 시뮬레이션 및 실전 봇 100% 동일 로직 적용
     def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th):
         balance = 10000.0
+        free_balance = 10000.0
         position = 0
         avg_entry_price = 0.0
         invested_margin = 0.0
@@ -297,6 +299,8 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
 
         for i in range(len(df)):
             close_price = df['Close'].iloc[i]
+            high_price = df['High'].iloc[i]
+            low_price = df['Low'].iloc[i]
             rsi = df['RSI_14'].iloc[i] * 100.0
             prob = df['Max_Prob'].iloc[i]
             pred = df['Pred'].iloc[i]
@@ -314,6 +318,7 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
                 if net_profit <= -invested_margin:
                     trades.append({'date': date, 'type': '마진콜 청산', 'price': close_price, 'profit': -invested_margin})
                     balance -= invested_margin
+                    free_balance = balance
                     position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
                     balance_history.append(balance)
                     continue
@@ -322,26 +327,30 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
                     if (position == 1 and rsi >= rsi_long_th) or (position == -1 and rsi <= rsi_short_th):
                         trades.append({'date': date, 'type': 'RSI 초과 포지션 종료', 'price': close_price, 'profit': net_profit})
                         balance += net_profit
+                        free_balance = balance
                         position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
                         balance_history.append(max(balance, 0))
                         continue
 
-            is_loss = (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
+            # 캔들 내 손실 여부 정밀 확인 (High/Low 변동 반영)
+            is_loss = (position == 1 and low_price < avg_entry_price) or (position == -1 and high_price > avg_entry_price) or (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
 
             if position == 0:
                 if prob >= entry_th:
                     if pred == 2:
                         position = 1
                         avg_entry_price = close_price
-                        invested_margin = balance * invest_ratio
+                        invested_margin = free_balance * invest_ratio
                         position_size = invested_margin * leverage
+                        free_balance -= invested_margin
                         pyramid_count = 0
                         trades.append({'date': date, 'type': 'Long 신규진입', 'price': close_price, 'profit': 0.0})
                     elif pred == 0:
                         position = -1
                         avg_entry_price = close_price
-                        invested_margin = balance * invest_ratio
+                        invested_margin = free_balance * invest_ratio
                         position_size = invested_margin * leverage
+                        free_balance -= invested_margin
                         pyramid_count = 0
                         trades.append({'date': date, 'type': 'Short 신규진입', 'price': close_price, 'profit': 0.0})
             else:
@@ -349,14 +358,16 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
                     if prob >= exit_th:
                         trades.append({'date': date, 'type': '신호 포지션 종료', 'price': close_price, 'profit': net_profit})
                         balance += net_profit
+                        free_balance = balance
                         position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
                 elif (position == 1 and pred == 2) or (position == -1 and pred == 0):
-                    if prob >= entry_th and is_loss and balance > 0 and pyramid_count < max_pyramid:
-                        add_margin = balance * invest_ratio
+                    if prob >= entry_th and is_loss and free_balance > 0 and pyramid_count < max_pyramid:
+                        add_margin = free_balance * invest_ratio
                         add_size = add_margin * leverage
                         total_size = position_size + add_size
                         avg_entry_price = (position_size * avg_entry_price + add_size * close_price) / total_size
                         invested_margin += add_margin
+                        free_balance -= add_margin
                         position_size = total_size
                         pyramid_count += 1
                         trades.append({'date': date, 'type': f'물타기 ({pyramid_count}/{max_pyramid}회)', 'price': close_price, 'profit': 0.0})
@@ -381,7 +392,6 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
         hist, trades = run_backtest(df_sub, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th)
         df_sub['Balance'] = hist
 
-        # 신규 포지션 진입 건수와 추가 물타기 건수 명확한 분리 표기
         initial_entries = len([t for t in trades if '신규진입' in t['type']])
         pyramid_entries = len([t for t in trades if '물타기' in t['type']])
 
