@@ -8,6 +8,8 @@ import plotly.graph_objects as go
 import os
 import joblib
 import ta
+import time
+from datetime import datetime
 from dotenv import load_dotenv
 
 # 페이지 설정
@@ -18,6 +20,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 API_KEY = os.getenv('BINANCE_API_KEY')
 SECRET_KEY = os.getenv('BINANCE_SECRET_KEY')
+
+# ver_2 실전 적용 파라미터 (고정)
+LIVE_LEVERAGE = 25
+LIVE_INVEST_RATIO = 0.25
+LIVE_ENTRY_TH = 0.42
+LIVE_EXIT_TH = 0.40
+LIVE_MAX_PYRAMID = 3
+LIVE_USE_RSI_EXIT = True
+LIVE_RSI_LONG_TH = 90
+LIVE_RSI_SHORT_TH = 10
 
 # ver_2 모델 로드
 @st.cache_resource
@@ -47,8 +59,8 @@ def get_exchange():
 exchange = get_exchange()
 SYMBOL = 'BTC/USDT'
 
-# 도쿄 VPS API 또는 yfinance 백업 캔들 수집
-@st.cache_data(ttl=300)
+# 도쿄 VPS API 또는 yfinance 백업 캔들 수집 (실시간 반영을 위해 ttl=10초 설정)
+@st.cache_data(ttl=10)
 def get_candle_data():
     df = None
     try:
@@ -141,66 +153,285 @@ def fetch_live_monitoring():
     except Exception:
         return None, None, None
 
+def fetch_live_trades():
+    if not exchange:
+        return []
+    try:
+        raw_trades = exchange.fetch_my_trades('BTC/USDT', limit=50)
+        formatted_trades = []
+        for t in raw_trades:
+            side = t.get('side', '').upper()
+            amount = float(t.get('amount', 0))
+            price = float(t.get('price', 0))
+            fee_info = t.get('fee', {})
+            fee = float(fee_info.get('cost', 0)) if fee_info else 0.0
+            pnl = float(t.get('info', {}).get('realizedPnl', 0.0))
+            trade_type = f"{side} 매수" if side == "BUY" else f"{side} 매도"
+            timestamp = pd.to_datetime(t.get('timestamp'), unit='ms')
+
+            formatted_trades.append({
+                '시간': timestamp.strftime('%Y-%m-%d %H:%M'),
+                '구분': trade_type,
+                '체결가(USD)': price,
+                '수량(BTC)': amount,
+                '수익금(USD)': pnl,
+                '수수료(USDT)': fee
+            })
+        return formatted_trades
+    except Exception:
+        return []
+
+# 공통 백테스트 / 시뮬레이션 엔진
+def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th):
+    balance = 10000.0
+    free_balance = 10000.0
+    position = 0
+    avg_entry_price = 0.0
+    invested_margin = 0.0
+    position_size = 0.0
+    pyramid_count = 0
+    fee_rate = 0.0004
+
+    balance_history = []
+    trades = []
+
+    for i in range(len(df)):
+        close_price = df['Close'].iloc[i]
+        high_price = df['High'].iloc[i]
+        low_price = df['Low'].iloc[i]
+        rsi = df['RSI_14'].iloc[i] * 100.0
+        prob = df['Max_Prob'].iloc[i]
+        pred = df['Pred'].iloc[i]
+        date = df.index[i]
+
+        if balance <= 0:
+            balance_history.append(0)
+            continue
+
+        net_profit = 0
+        if position != 0:
+            price_change_pct = (close_price - avg_entry_price) / avg_entry_price * position
+            net_profit = (position_size * price_change_pct) - (position_size * fee_rate * 2)
+
+            if net_profit <= -invested_margin:
+                trades.append({'date': date, 'type': '마진콜 청산', 'price': close_price, 'profit': -invested_margin})
+                balance -= invested_margin
+                free_balance = balance
+                position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
+                balance_history.append(balance)
+                continue
+
+            if use_rsi_exit:
+                if (position == 1 and rsi >= rsi_long_th) or (position == -1 and rsi <= rsi_short_th):
+                    trades.append({'date': date, 'type': 'RSI 초과 포지션 종료', 'price': close_price, 'profit': net_profit})
+                    balance += net_profit
+                    free_balance = balance
+                    position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
+                    balance_history.append(max(balance, 0))
+                    continue
+
+        # 캔들 내 손실 여부 정밀 확인 (High/Low 변동 반영)
+        is_loss = (position == 1 and low_price < avg_entry_price) or (position == -1 and high_price > avg_entry_price) or (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
+
+        if position == 0:
+            if prob >= entry_th:
+                if pred == 2:
+                    position = 1
+                    avg_entry_price = close_price
+                    invested_margin = free_balance * invest_ratio
+                    position_size = invested_margin * leverage
+                    free_balance -= invested_margin
+                    pyramid_count = 0
+                    trades.append({'date': date, 'type': 'Long 신규진입', 'price': close_price, 'profit': 0.0})
+                elif pred == 0:
+                    position = -1
+                    avg_entry_price = close_price
+                    invested_margin = free_balance * invest_ratio
+                    position_size = invested_margin * leverage
+                    free_balance -= invested_margin
+                    pyramid_count = 0
+                    trades.append({'date': date, 'type': 'Short 신규진입', 'price': close_price, 'profit': 0.0})
+        else:
+            if (position == 1 and pred == 0) or (position == -1 and pred == 2):
+                if prob >= exit_th:
+                    trades.append({'date': date, 'type': '신호 포지션 종료', 'price': close_price, 'profit': net_profit})
+                    balance += net_profit
+                    free_balance = balance
+                    position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
+            elif (position == 1 and pred == 2) or (position == -1 and pred == 0):
+                if prob >= entry_th and is_loss and free_balance > 0 and pyramid_count < max_pyramid:
+                    add_margin = free_balance * invest_ratio
+                    add_size = add_margin * leverage
+                    total_size = position_size + add_size
+                    avg_entry_price = (position_size * avg_entry_price + add_size * close_price) / total_size
+                    invested_margin += add_margin
+                    free_balance -= add_margin
+                    position_size = total_size
+                    pyramid_count += 1
+                    trades.append({'date': date, 'type': f'물타기 ({pyramid_count}/{max_pyramid}회)', 'price': close_price, 'profit': 0.0})
+
+        balance_history.append(max(balance + (net_profit if position != 0 else 0), 0))
+
+    return balance_history, trades
+
+# 차트 및 시각화 도우미 함수
+def render_trade_charts(df_input, balance_hist, trades_list, pos_data=None, title_prefix=""):
+    # 1. 누적 자산 변화 차트
+    st.subheader(f"💰 {title_prefix}누적 자산 변화 (ver_2 모델)")
+    fig_bal = go.Figure()
+    fig_bal.add_trace(go.Scatter(x=df_input.index, y=balance_hist, mode='lines', name='포트폴리오 가치', line=dict(color='cyan', width=2)))
+    fig_bal.add_hline(y=10000, line_dash="dash", line_color="gray", annotation_text="초기 자본금 ($10,000)")
+    fig_bal.update_layout(template='plotly_dark', height=380, xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified', margin=dict(l=0, r=0, t=30, b=10))
+    st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
+
+    # 2. 15분봉 및 매매 타점 차트
+    st.subheader(f"📈 {title_prefix}바이낸스 선물 15분봉 및 ver_2 진입/청산 타점 시각화")
+    fig_candle = go.Figure(data=[go.Candlestick(
+        x=df_input.index, open=df_input['Open'], high=df_input['High'], low=df_input['Low'], close=df_input['Close'], name='BTC Price',
+        increasing_line_color='green', decreasing_line_color='red'
+    )])
+
+    # 실전 포지션 라인 표시
+    if pos_data:
+        side = pos_data['side']
+        entry_p = pos_data['entryPrice']
+        liq_p = pos_data['liquidationPrice']
+        line_col = "lime" if side == "LONG" else "red"
+        fig_candle.add_hline(y=entry_p, line_dash="dash", line_color=line_col, 
+                             annotation_text=f"실전 {side} 진입평단: ${entry_p:,.2f}", annotation_position="top left")
+        if liq_p > 0:
+            fig_candle.add_hline(y=liq_p, line_dash="dot", line_color="orange", 
+                                 annotation_text=f"추정 청산가: ${liq_p:,.2f}", annotation_position="bottom left")
+
+    margin = (df_input['High'].max() - df_input['Low'].min()) * 0.02
+    long_entries = [t for t in trades_list if t['type'] == 'Long 신규진입']
+    short_entries = [t for t in trades_list if t['type'] == 'Short 신규진입']
+    add_margins = [t for t in trades_list if '물타기' in t['type']]
+    model_exits = [t for t in trades_list if t['type'] == '신호 포지션 종료']
+    rsi_exits = [t for t in trades_list if t['type'] == 'RSI 초과 포지션 종료']
+    liquidations = [t for t in trades_list if t['type'] == '마진콜 청산']
+
+    if long_entries:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in long_entries], y=[t['price'] - margin for t in long_entries],
+                                        mode='markers', marker=dict(symbol='triangle-up', size=12, color='lime', line=dict(width=1, color='darkgreen')), name='Long 신규진입'))
+    if short_entries:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in short_entries], y=[t['price'] + margin for t in short_entries],
+                                        mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='darkred')), name='Short 신규진입'))
+    if add_margins:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in add_margins], y=[t['price'] for t in add_margins],
+                                        mode='markers', marker=dict(symbol='star', size=10, color='blue'), name='물타기 (추가진입)'))
+    if model_exits:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in model_exits], y=[t['price'] for t in model_exits],
+                                        mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='신호 포지션 종료'))
+    if rsi_exits:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in rsi_exits], y=[t['price'] for t in rsi_exits],
+                                        mode='markers', marker=dict(symbol='x', size=12, color='orange'), name='RSI 초과 포지션 종료'))
+    if liquidations:
+        fig_candle.add_trace(go.Scatter(x=[t['date'] for t in liquidations], y=[t['price'] for t in liquidations],
+                                        mode='markers', marker=dict(symbol='x', size=14, color='purple'), name='마진콜 강제청산'))
+
+    fig_candle.update_layout(template='plotly_dark', height=580, xaxis_rangeslider_visible=False, yaxis_title="Price (USD)", dragmode='pan', hovermode='x unified', margin=dict(l=0, r=0, t=30, b=10))
+    st.plotly_chart(fig_candle, use_container_width=True, config={'scrollZoom': True})
+
+
 # 사이드바 메뉴 선택
 st.sidebar.title("📌 메뉴 선택")
 mode = st.sidebar.radio("모드 전환", ["🤖 실시간 자동매매 모니터링", "📈 ver_2 백테스트 시뮬레이터"])
 
 raw_df = get_candle_data()
 
+# 실시간 모니터링 자동 새로고침 옵션
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚡ 실시간 자동 새로고침")
+auto_refresh = st.sidebar.checkbox("자동 새로고침 활성화", value=True)
+refresh_sec = st.sidebar.selectbox("새로고침 주기 (초)", [5, 10, 15, 30, 60], index=0)
+
 if mode == "🤖 실시간 자동매매 모니터링":
-    st.title("🤖 바이낸스 ver_2 AI 실시간 자동매매 모니터링")
-    
-    usdt_total, usdt_free, pos_data = fetch_live_monitoring()
-    
-    if raw_df is not None and not raw_df.empty:
-        current_price = raw_df['Close'].iloc[-1]
+
+    fragment_kwargs = {"run_every": refresh_sec} if auto_refresh else {}
+
+    @st.fragment(**fragment_kwargs)
+    def render_live_monitoring():
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        col1, col2, col3, col4 = st.columns(4)
+        col_title, col_time = st.columns([3, 1])
+        with col_title:
+            st.title("🤖 바이낸스 ver_2 AI 실시간 자동매매 모니터링")
+        with col_time:
+            st.caption(f"⏱️ 마지막 업데이트: `{now_str}`")
+            if st.button("🔄 실시간 데이터 새로고침", use_container_width=True):
+                st.rerun()
+
+        # 데이터 수집
+        usdt_total, usdt_free, pos_data = fetch_live_monitoring()
+        df_live = raw_df.copy() if raw_df is not None else pd.DataFrame()
+
+        if df_live.empty:
+            st.error("데이터를 불러오는 중입니다...")
+            return
+
+        current_price = df_live['Close'].iloc[-1]
+
+        # 1. 핵심 지표 카드 (4 메트릭)
+        m1, m2, m3, m4 = st.columns(4)
         if usdt_total is not None:
-            col1.metric("총 보유 자산 (USDT)", f"${usdt_total:,.2f}")
-            col2.metric("사용 가능 잔고 (USDT)", f"${usdt_free:,.2f}")
+            m1.metric("총 보유 자산 (USDT)", f"${usdt_total:,.2f}")
+            m2.metric("사용 가능 잔고 (USDT)", f"${usdt_free:,.2f}")
         else:
-            col1.metric("총 보유 자산", "조회 불가 (API Key 확인)")
-            col2.metric("사용 가능 잔고", "조회 불가")
-            
-        col3.metric("현재 비트코인 가격", f"${current_price:,.2f}")
-        
+            m1.metric("총 보유 자산", "조회 불가 (API Key 확인)")
+            m2.metric("사용 가능 잔고", "조회 불가")
+
+        m3.metric("현재 비트코인 가격", f"${current_price:,.2f}")
+
         if pos_data:
             side = pos_data['side']
             unrealized_pnl = pos_data['unrealizedPnl']
             pnl_roe = pos_data['pnlRoe']
             leverage = pos_data['leverage']
-            color = "normal" if unrealized_pnl >= 0 else "inverse"
-            col4.metric(f"포지션: {side} ({leverage}x)", f"${unrealized_pnl:,.2f} ({pnl_roe:+.2f}%)", delta_color=color)
+            delta_color = "normal" if unrealized_pnl >= 0 else "inverse"
+            m4.metric(f"포지션: {side} ({leverage}x)", f"${unrealized_pnl:,.2f} ({pnl_roe:+.2f}%)", delta_color=delta_color)
         else:
-            col4.metric("현재 포지션", "없음 (대기중)")
+            m4.metric("현재 포지션", "없음 (대기중)")
 
         st.markdown("---")
 
+        # 2. 실전 적용 파라미터 정보 배지 (슬라이더 대신 실전 파라미터 현황 시각화)
+        st.subheader("⚙️ 현재 가동 중인 실전 매매 파라미터 (고정)")
+        p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
+        p_col1.info(f"**레버리지**\n\n`{LIVE_LEVERAGE}x (격리)`")
+        p_col2.info(f"**1회 진입 비중**\n\n`{int(LIVE_INVEST_RATIO*100)}%`")
+        p_col3.info(f"**진입 임계점**\n\n`{LIVE_ENTRY_TH:.2f}`")
+        p_col4.info(f"**청산 임계점**\n\n`{LIVE_EXIT_TH:.2f}`")
+        p_col5.info(f"**최대 물타기**\n\n`{LIVE_MAX_PYRAMID}회`")
+        p_col6.info(f"**RSI 청산 조건**\n\n`Long>={LIVE_RSI_LONG_TH} / Short<={LIVE_RSI_SHORT_TH}`")
+
+        st.markdown("---")
+
+        # 3. ver_2 AI 모델 실시간 예측 분석
         st.subheader("🎯 ver_2 AI 모델 실시간 예측 분석")
-        current_feat = raw_df.iloc[-1]
+        current_feat = df_live.iloc[-1]
         features = ['Returns', 'Body_Size', 'Upper_Shadow', 'Lower_Shadow', 
                     'RSI_14', 'ATR_Ratio', 'Close_vs_SMA20', 'BB_Width', 'BB_Pos', 'Close_vs_SMA20_1H']
         X = current_feat[features].values.reshape(1, -1)
-        
+
         probs = model.predict_proba(X)[0]
         pred_class = np.argmax(probs)
-        
+
         p_short, p_neutral, p_long = probs[0]*100, probs[1]*100, probs[2]*100
         rsi_val = current_feat['RSI_14'] * 100
-        
-        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+
+        sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
         if pred_class == 2:
-            m_col1.success("📈 AI 시그널: LONG (상승)")
+            sig_col1.success("📈 AI 시그널: LONG (상승)")
         elif pred_class == 0:
-            m_col1.error("📉 AI 시그널: SHORT (하락)")
+            sig_col1.error("📉 AI 시그널: SHORT (하락)")
         else:
-            m_col1.warning("⏳ AI 시그널: HOLD (관망)")
-            
-        m_col2.metric("상승(Long) 확률", f"{p_long:.1f}%")
-        m_col3.metric("하락(Short) 확률", f"{p_short:.1f}%")
-        m_col4.metric("RSI (14)", f"{rsi_val:.1f}")
-        
+            sig_col1.warning("⏳ AI 시그널: HOLD (관망)")
+
+        sig_col2.metric("상승(Long) 확률", f"{p_long:.1f}%")
+        sig_col3.metric("하락(Short) 확률", f"{p_short:.1f}%")
+        sig_col4.metric("RSI (14)", f"{rsi_val:.1f}")
+
         prob_df = pd.DataFrame({
             '방향': ['하락 (Short)', '관망 (Hold)', '상승 (Long)'],
             '확률 (%)': [p_short, p_neutral, p_long]
@@ -213,50 +444,54 @@ if mode == "🤖 실시간 자동매매 모니터링":
             text=[f"{p:.1f}%" for p in [p_short, p_neutral, p_long]],
             textposition='auto'
         ))
-        fig_prob.update_layout(template='plotly_dark', height=180, margin=dict(l=0, r=0, t=10, b=10), xaxis=dict(range=[0, 100]))
+        fig_prob.update_layout(template='plotly_dark', height=160, margin=dict(l=0, r=0, t=10, b=10), xaxis=dict(range=[0, 100]))
         st.plotly_chart(fig_prob, use_container_width=True)
 
         st.markdown("---")
 
-        col_chart, col_info = st.columns([2.8, 1.2])
+        # 4. 백테스트 시뮬레이터와 완벽하게 일치하는 실시간 자산 추이 및 15분봉 차트 시각화
+        X_all = df_live[features]
+        probs_all = model.predict_proba(X_all)
+        df_live['Max_Prob'] = np.max(probs_all, axis=1)
+        df_live['Pred'] = np.argmax(probs_all, axis=1)
 
-        df_chart = raw_df.reset_index()
-        df_chart['timestamp'] = df_chart['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Seoul').dt.tz_localize(None) if df_chart['timestamp'].dt.tz is not None else df_chart['timestamp']
+        live_hist, live_trades = run_backtest(
+            df_live, LIVE_ENTRY_TH, LIVE_EXIT_TH, LIVE_LEVERAGE, LIVE_INVEST_RATIO, 
+            LIVE_MAX_PYRAMID, LIVE_USE_RSI_EXIT, LIVE_RSI_LONG_TH, LIVE_RSI_SHORT_TH
+        )
 
-        with col_chart:
-            st.subheader("📊 실시간 15분봉 차트")
-            fig = go.Figure(data=[go.Candlestick(
-                x=df_chart['timestamp'],
-                open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'],
-                increasing_line_color='green', decreasing_line_color='red'
-            )])
-            if pos_data:
-                line_color = "lime" if pos_data['side'] == "LONG" else "red"
-                fig.add_hline(y=pos_data['entryPrice'], line_dash="dash", line_color=line_color, 
-                              annotation_text=f"{pos_data['side']} 진입평단: ${pos_data['entryPrice']:,.2f}")
-            fig.update_layout(template='plotly_dark', height=520, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig, use_container_width=True)
+        render_trade_charts(df_live, live_hist, live_trades, pos_data=pos_data, title_prefix="실시간 ")
 
-        with col_info:
-            st.subheader("💡 포지션 상세 정보")
-            if pos_data:
-                side_badge = "🔴 SHORT (하락 배팅)" if pos_data['side'] == "SHORT" else "🟢 LONG (상승 배팅)"
-                st.markdown(f"#### {side_badge}")
-                st.markdown(f"""
-                * **레버리지:** `{pos_data['leverage']}x` (격리)
-                * **계약 수량:** `{pos_data['contracts']:.3f} BTC`
-                * **진입 평단가:** `${pos_data['entryPrice']:,.2f}`
-                * **현재가:** `${current_price:,.2f}`
-                * **총 포지션 가치:** `${pos_data['notionalValue']:,.2f} USDT`
-                * **실제 투입 증거금:** `${pos_data['initialMargin']:,.2f} USDT`
-                * **미실현 손익 (PnL):** `${pos_data['unrealizedPnl']:,.2f} USDT` (`{pos_data['pnlRoe']:+.2f}%`)
-                * **추정 청산가:** `${pos_data['liquidationPrice']:,.2f}`
-                """)
+        st.markdown("---")
+
+        # 5. 상세 매매 일지 (바이낸스 체결 내역 & 최근 실전 신호 일지)
+        st.subheader("📝 상세 매매 일지")
+        tab_sim, tab_real = st.tabs(["📊 최근 실전 신호/시뮬레이션 일지", "📜 바이낸스 계좌 실제 체결 이력"])
+
+        with tab_sim:
+            if live_trades:
+                trades_df = pd.DataFrame(live_trades)
+                trades_df.columns = ['시간', '구분', '체결가(USD)', '수익금(USD)']
+                trades_df['시간'] = pd.to_datetime(trades_df['시간']).dt.strftime('%Y-%m-%d %H:%M')
+                trades_df['체결가(USD)'] = trades_df['체결가(USD)'].apply(lambda x: f"${x:,.2f}")
+                trades_df['수익금(USD)'] = trades_df['수익금(USD)'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
+                st.dataframe(trades_df, use_container_width=True, hide_index=True)
             else:
-                st.warning("현재 진입한 포지션이 없습니다.\n\nAI가 42% 이상의 확실한 신호를 기다리고 있습니다.")
+                st.info("최근 구간 내 발생한 매매 신호가 없습니다.")
 
-        if st.button("🔄 실시간 데이터 새로고침"):
-            st.rerun()
+        with tab_real:
+            real_trades = fetch_live_trades()
+            if real_trades:
+                real_df = pd.DataFrame(real_trades)
+                real_df['체결가(USD)'] = real_df['체결가(USD)'].apply(lambda x: f"${x:,.2f}")
+                real_df['수량(BTC)'] = real_df['수량(BTC)'].apply(lambda x: f"{x:.3f}")
+                real_df['수익금(USD)'] = real_df['수익금(USD)'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
+                real_df['수수료(USDT)'] = real_df['수수료(USDT)'].apply(lambda x: f"${x:,.4f}")
+                st.dataframe(real_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("바이낸스 계좌에서 조회된 최근 체결 내역이 없거나 API Key가 설정되지 않았습니다.")
+
+    render_live_monitoring()
 
 elif mode == "📈 ver_2 백테스트 시뮬레이터":
     st.title("📈 비트코인 ver_2 AI 선물 백테스트 시뮬레이터")
@@ -283,99 +518,6 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
     else:
         rsi_long_th, rsi_short_th = 90, 10
 
-    # 시뮬레이션 및 실전 봇 100% 동일 로직 적용
-    def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th):
-        balance = 10000.0
-        free_balance = 10000.0
-        position = 0
-        avg_entry_price = 0.0
-        invested_margin = 0.0
-        position_size = 0.0
-        pyramid_count = 0
-        fee_rate = 0.0004
-
-        balance_history = []
-        trades = []
-
-        for i in range(len(df)):
-            close_price = df['Close'].iloc[i]
-            high_price = df['High'].iloc[i]
-            low_price = df['Low'].iloc[i]
-            rsi = df['RSI_14'].iloc[i] * 100.0
-            prob = df['Max_Prob'].iloc[i]
-            pred = df['Pred'].iloc[i]
-            date = df.index[i]
-
-            if balance <= 0:
-                balance_history.append(0)
-                continue
-
-            net_profit = 0
-            if position != 0:
-                price_change_pct = (close_price - avg_entry_price) / avg_entry_price * position
-                net_profit = (position_size * price_change_pct) - (position_size * fee_rate * 2)
-
-                if net_profit <= -invested_margin:
-                    trades.append({'date': date, 'type': '마진콜 청산', 'price': close_price, 'profit': -invested_margin})
-                    balance -= invested_margin
-                    free_balance = balance
-                    position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
-                    balance_history.append(balance)
-                    continue
-
-                if use_rsi_exit:
-                    if (position == 1 and rsi >= rsi_long_th) or (position == -1 and rsi <= rsi_short_th):
-                        trades.append({'date': date, 'type': 'RSI 초과 포지션 종료', 'price': close_price, 'profit': net_profit})
-                        balance += net_profit
-                        free_balance = balance
-                        position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
-                        balance_history.append(max(balance, 0))
-                        continue
-
-            # 캔들 내 손실 여부 정밀 확인 (High/Low 변동 반영)
-            is_loss = (position == 1 and low_price < avg_entry_price) or (position == -1 and high_price > avg_entry_price) or (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
-
-            if position == 0:
-                if prob >= entry_th:
-                    if pred == 2:
-                        position = 1
-                        avg_entry_price = close_price
-                        invested_margin = free_balance * invest_ratio
-                        position_size = invested_margin * leverage
-                        free_balance -= invested_margin
-                        pyramid_count = 0
-                        trades.append({'date': date, 'type': 'Long 신규진입', 'price': close_price, 'profit': 0.0})
-                    elif pred == 0:
-                        position = -1
-                        avg_entry_price = close_price
-                        invested_margin = free_balance * invest_ratio
-                        position_size = invested_margin * leverage
-                        free_balance -= invested_margin
-                        pyramid_count = 0
-                        trades.append({'date': date, 'type': 'Short 신규진입', 'price': close_price, 'profit': 0.0})
-            else:
-                if (position == 1 and pred == 0) or (position == -1 and pred == 2):
-                    if prob >= exit_th:
-                        trades.append({'date': date, 'type': '신호 포지션 종료', 'price': close_price, 'profit': net_profit})
-                        balance += net_profit
-                        free_balance = balance
-                        position, invested_margin, position_size, pyramid_count = 0, 0, 0, 0
-                elif (position == 1 and pred == 2) or (position == -1 and pred == 0):
-                    if prob >= entry_th and is_loss and free_balance > 0 and pyramid_count < max_pyramid:
-                        add_margin = free_balance * invest_ratio
-                        add_size = add_margin * leverage
-                        total_size = position_size + add_size
-                        avg_entry_price = (position_size * avg_entry_price + add_size * close_price) / total_size
-                        invested_margin += add_margin
-                        free_balance -= add_margin
-                        position_size = total_size
-                        pyramid_count += 1
-                        trades.append({'date': date, 'type': f'물타기 ({pyramid_count}/{max_pyramid}회)', 'price': close_price, 'profit': 0.0})
-
-            balance_history.append(max(balance + (net_profit if position != 0 else 0), 0))
-
-        return balance_history, trades
-
     df_sub = raw_df[raw_df.index >= pd.to_datetime(start_date)]
 
     if df_sub.empty:
@@ -401,48 +543,7 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
         col3.metric("독립 신규 포지션 수", f"{initial_entries}회")
         col4.metric("총 매매 주문 수 (물타기 포함)", f"{initial_entries + pyramid_entries}회", f"추가 물타기 {pyramid_entries}회 포함")
 
-        st.subheader("💰 백테스트 누적 자산 변화 (ver_2 모델)")
-        fig_bal = go.Figure()
-        fig_bal.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Balance'], mode='lines', name='포트폴리오 가치', line=dict(color='cyan', width=2)))
-        fig_bal.add_hline(y=10000, line_dash="dash", line_color="gray")
-        fig_bal.update_layout(template='plotly_dark', height=400, xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified')
-        st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
-
-        st.subheader("📈 바이낸스 선물 15분봉 및 ver_2 진입/청산 타점 시각화")
-        fig_candle = go.Figure(data=[go.Candlestick(
-            x=df_sub.index, open=df_sub['Open'], high=df_sub['High'], low=df_sub['Low'], close=df_sub['Close'], name='BTC Price',
-            increasing_line_color='green', decreasing_line_color='red'
-        )])
-
-        margin = (df_sub['High'].max() - df_sub['Low'].min()) * 0.02
-        long_entries = [t for t in trades if t['type'] == 'Long 신규진입']
-        short_entries = [t for t in trades if t['type'] == 'Short 신규진입']
-        add_margins = [t for t in trades if '물타기' in t['type']]
-        model_exits = [t for t in trades if t['type'] == '신호 포지션 종료']
-        rsi_exits = [t for t in trades if t['type'] == 'RSI 초과 포지션 종료']
-        liquidations = [t for t in trades if t['type'] == '마진콜 청산']
-
-        if long_entries:
-            fig_candle.add_trace(go.Scatter(x=[t['date'] for t in long_entries], y=[t['price'] - margin for t in long_entries],
-                                            mode='markers', marker=dict(symbol='triangle-up', size=12, color='lime', line=dict(width=1, color='darkgreen')), name='Long 신규진입'))
-        if short_entries:
-            fig_candle.add_trace(go.Scatter(x=[t['date'] for t in short_entries], y=[t['price'] + margin for t in short_entries],
-                                            mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='darkred')), name='Short 신규진입'))
-        if add_margins:
-            fig_candle.add_trace(go.Scatter(x=[t['date'] for t in add_margins], y=[t['price'] for t in add_margins],
-                                            mode='markers', marker=dict(symbol='star', size=10, color='blue'), name='물타기 (추가진입)'))
-        if model_exits:
-            fig_candle.add_trace(go.Scatter(x=[t['date'] for t in model_exits], y=[t['price'] for t in model_exits],
-                                            mode='markers', marker=dict(symbol='x', size=10, color='yellow'), name='신호 포지션 종료'))
-        if rsi_exits:
-            fig_candle.add_trace(go.Scatter(x=[t['date'] for t in rsi_exits], y=[t['price'] for t in rsi_exits],
-                                            mode='markers', marker=dict(symbol='x', size=12, color='orange'), name='RSI 초과 포지션 종료'))
-        if liquidations:
-            fig_candle.add_trace(go.Scatter(x=[t['date'] for t in liquidations], y=[t['price'] for t in liquidations],
-                                            mode='markers', marker=dict(symbol='x', size=14, color='purple'), name='마진콜 강제청산'))
-
-        fig_candle.update_layout(template='plotly_dark', height=600, xaxis_rangeslider_visible=False, yaxis_title="Price (USD)", dragmode='pan', hovermode='x unified')
-        st.plotly_chart(fig_candle, use_container_width=True, config={'scrollZoom': True})
+        render_trade_charts(df_sub, hist, trades, title_prefix="백테스트 ")
 
         st.subheader("📝 ver_2 상세 매매 일지")
         if trades:
