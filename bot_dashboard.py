@@ -112,7 +112,7 @@ def get_candle_data():
     df.dropna(inplace=True)
     return df
 
-# 실시간 모니터링 데이터 수집
+# 실시간 바이낸스 모니터링 데이터 수집 (계좌 잔고 및 오픈 포지션)
 def fetch_live_monitoring():
     if not exchange:
         return None, None, None
@@ -153,35 +153,72 @@ def fetch_live_monitoring():
     except Exception:
         return None, None, None
 
-def fetch_live_trades():
+# 실제 바이낸스 체결 내역 및 실전 자산 추이 생성
+def fetch_real_trades_and_equity():
     if not exchange:
-        return []
+        return [], None
     try:
-        raw_trades = exchange.fetch_my_trades('BTC/USDT', limit=50)
+        raw_trades = exchange.fetch_my_trades('BTC/USDT', limit=100)
+        account_info = exchange.fapiPrivateV2GetAccount()
+        current_balance = float(account_info.get('totalWalletBalance', 0.0))
+
+        if not raw_trades:
+            return [], None
+
         formatted_trades = []
-        for t in raw_trades:
+        sorted_trades = sorted(raw_trades, key=lambda x: x['timestamp'])
+
+        for t in sorted_trades:
+            dt = pd.to_datetime(t['timestamp'], unit='ms')
+            if dt.tz is None:
+                dt = dt.tz_localize('UTC').tz_convert('Asia/Seoul').tz_localize(None)
+            else:
+                dt = dt.tz_convert('Asia/Seoul').tz_localize(None)
+
             side = t.get('side', '').upper()
-            amount = float(t.get('amount', 0))
-            price = float(t.get('price', 0))
+            price = float(t.get('price', 0.0))
+            amount = float(t.get('amount', 0.0))
+            info = t.get('info', {})
+            pnl = float(info.get('realizedPnl', 0.0))
             fee_info = t.get('fee', {})
-            fee = float(fee_info.get('cost', 0)) if fee_info else 0.0
-            pnl = float(t.get('info', {}).get('realizedPnl', 0.0))
-            trade_type = f"{side} 매수" if side == "BUY" else f"{side} 매도"
-            timestamp = pd.to_datetime(t.get('timestamp'), unit='ms')
+            fee = float(fee_info.get('cost', 0.0)) if fee_info else float(info.get('commission', 0.0))
+
+            trade_type = "🟢 매수 (BUY)" if side == "BUY" else "🔴 매도 (SELL)"
+            if pnl != 0:
+                trade_type += f" [청산 PnL: ${pnl:+,.2f}]"
 
             formatted_trades.append({
-                '시간': timestamp.strftime('%Y-%m-%d %H:%M'),
-                '구분': trade_type,
-                '체결가(USD)': price,
-                '수량(BTC)': amount,
-                '수익금(USD)': pnl,
-                '수수료(USDT)': fee
+                'date': dt,
+                'type': trade_type,
+                'raw_side': side,
+                'price': price,
+                'amount': amount,
+                'pnl': pnl,
+                'fee': fee
             })
-        return formatted_trades
-    except Exception:
-        return []
 
-# 공통 백테스트 / 시뮬레이션 엔진
+        # 실제 계좌 잔고 변화 추이 구성
+        equity_records = []
+        cum_pnl = sum([tr['pnl'] - tr['fee'] for tr in formatted_trades])
+        start_balance = max(current_balance - cum_pnl, 0.0)
+
+        running_balance = start_balance
+        for tr in formatted_trades:
+            running_balance += (tr['pnl'] - tr['fee'])
+            equity_records.append({
+                'date': tr['date'],
+                'Balance': running_balance
+            })
+
+        equity_df = pd.DataFrame(equity_records)
+        if not equity_df.empty:
+            equity_df.set_index('date', inplace=True)
+
+        return formatted_trades, equity_df
+    except Exception:
+        return [], None
+
+# 백테스트 시뮬레이션 전용 엔진
 def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th):
     balance = 10000.0
     free_balance = 10000.0
@@ -230,7 +267,6 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use
                     balance_history.append(max(balance, 0))
                     continue
 
-        # 캔들 내 손실 여부 정밀 확인 (High/Low 변동 반영)
         is_loss = (position == 1 and low_price < avg_entry_price) or (position == -1 and high_price > avg_entry_price) or (position == 1 and close_price < avg_entry_price) or (position == -1 and close_price > avg_entry_price)
 
         if position == 0:
@@ -274,24 +310,42 @@ def run_backtest(df, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use
 
     return balance_history, trades
 
-# 차트 및 시각화 도우미 함수
-def render_trade_charts(df_input, balance_hist, trades_list, pos_data=None, title_prefix=""):
-    # 1. 누적 자산 변화 차트
-    st.subheader(f"💰 {title_prefix}누적 자산 변화 (ver_2 모델)")
+
+# 실시간 바이낸스 모니터링 전용 차트 렌더링
+def render_real_monitoring_charts(df_candle, real_trades, equity_df, pos_data=None, current_balance=100.0):
+    # 1. 실제 계좌 누적 자산 변화 차트
+    st.subheader("💰 실제 계좌 누적 자산 변화 (바이낸스 실전 데이터)")
     fig_bal = go.Figure()
-    fig_bal.add_trace(go.Scatter(x=df_input.index, y=balance_hist, mode='lines', name='포트폴리오 가치', line=dict(color='cyan', width=2)))
-    fig_bal.add_hline(y=10000, line_dash="dash", line_color="gray", annotation_text="초기 자본금 ($10,000)")
-    fig_bal.update_layout(template='plotly_dark', height=380, xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified', margin=dict(l=0, r=0, t=30, b=10))
+
+    if equity_df is not None and not equity_df.empty:
+        fig_bal.add_trace(go.Scatter(
+            x=equity_df.index, y=equity_df['Balance'], 
+            mode='lines+markers', name='실제 계좌 잔고 (USDT)', 
+            line=dict(color='cyan', width=2), marker=dict(size=6, color='cyan')
+        ))
+    else:
+        fig_bal.add_trace(go.Scatter(
+            x=[df_candle.index.min(), df_candle.index.max()], 
+            y=[current_balance, current_balance], 
+            mode='lines', name='실제 계좌 잔고 (USDT)', 
+            line=dict(color='cyan', width=2, dash='dash')
+        ))
+
+    fig_bal.update_layout(
+        template='plotly_dark', height=350, 
+        xaxis_title="시간 (KST)", yaxis_title="잔고 (USDT)", 
+        dragmode='pan', hovermode='x unified', margin=dict(l=0, r=0, t=30, b=10)
+    )
     st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
 
-    # 2. 15분봉 및 매매 타점 차트
-    st.subheader(f"📈 {title_prefix}바이낸스 선물 15분봉 및 ver_2 진입/청산 타점 시각화")
+    # 2. 실제 바이낸스 15분봉 및 실전 매매 타점 시각화 차트
+    st.subheader("📈 실제 바이낸스 선물 15분봉 및 실전 매매 타점 시각화")
     fig_candle = go.Figure(data=[go.Candlestick(
-        x=df_input.index, open=df_input['Open'], high=df_input['High'], low=df_input['Low'], close=df_input['Close'], name='BTC Price',
+        x=df_candle.index, open=df_candle['Open'], high=df_candle['High'], low=df_candle['Low'], close=df_candle['Close'], name='BTC Price',
         increasing_line_color='green', decreasing_line_color='red'
     )])
 
-    # 실전 포지션 라인 표시
+    # 실전 포지션 라인 표시 (오픈 포지션 존재 시)
     if pos_data:
         side = pos_data['side']
         entry_p = pos_data['entryPrice']
@@ -302,6 +356,56 @@ def render_trade_charts(df_input, balance_hist, trades_list, pos_data=None, titl
         if liq_p > 0:
             fig_candle.add_hline(y=liq_p, line_dash="dot", line_color="orange", 
                                  annotation_text=f"추정 청산가: ${liq_p:,.2f}", annotation_position="bottom left")
+
+    # 실제 바이낸스 체결 타점 마커
+    if real_trades:
+        buy_trades = [t for t in real_trades if t['raw_side'] == 'BUY']
+        sell_trades = [t for t in real_trades if t['raw_side'] == 'SELL']
+        pnl_trades = [t for t in real_trades if t['pnl'] != 0]
+
+        margin = (df_candle['High'].max() - df_candle['Low'].min()) * 0.02
+
+        if buy_trades:
+            fig_candle.add_trace(go.Scatter(
+                x=[t['date'] for t in buy_trades], y=[t['price'] - margin for t in buy_trades],
+                mode='markers', marker=dict(symbol='triangle-up', size=14, color='lime', line=dict(width=1, color='darkgreen')),
+                name='실제 매수 체결 (BUY)'
+            ))
+        if sell_trades:
+            fig_candle.add_trace(go.Scatter(
+                x=[t['date'] for t in sell_trades], y=[t['price'] + margin for t in sell_trades],
+                mode='markers', marker=dict(symbol='triangle-down', size=14, color='red', line=dict(width=1, color='darkred')),
+                name='실제 매도 체결 (SELL)'
+            ))
+        if pnl_trades:
+            fig_candle.add_trace(go.Scatter(
+                x=[t['date'] for t in pnl_trades], y=[t['price'] for t in pnl_trades],
+                mode='markers', marker=dict(symbol='x', size=12, color='yellow'),
+                name='실제 손익 확정 청산'
+            ))
+
+    fig_candle.update_layout(
+        template='plotly_dark', height=580, 
+        xaxis_rangeslider_visible=False, yaxis_title="Price (USD)", 
+        dragmode='pan', hovermode='x unified', margin=dict(l=0, r=0, t=30, b=10)
+    )
+    st.plotly_chart(fig_candle, use_container_width=True, config={'scrollZoom': True})
+
+
+# 백테스트 전용 차트 렌더링
+def render_backtest_charts(df_input, balance_hist, trades_list):
+    st.subheader("💰 백테스트 누적 자산 변화 (ver_2 모델)")
+    fig_bal = go.Figure()
+    fig_bal.add_trace(go.Scatter(x=df_input.index, y=balance_hist, mode='lines', name='포트폴리오 가치', line=dict(color='cyan', width=2)))
+    fig_bal.add_hline(y=10000, line_dash="dash", line_color="gray", annotation_text="초기 자본금 ($10,000)")
+    fig_bal.update_layout(template='plotly_dark', height=380, xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified', margin=dict(l=0, r=0, t=30, b=10))
+    st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
+
+    st.subheader("📈 바이낸스 선물 15분봉 및 ver_2 백테스트 진입/청산 타점 시각화")
+    fig_candle = go.Figure(data=[go.Candlestick(
+        x=df_input.index, open=df_input['Open'], high=df_input['High'], low=df_input['Low'], close=df_input['Close'], name='BTC Price',
+        increasing_line_color='green', decreasing_line_color='red'
+    )])
 
     margin = (df_input['High'].max() - df_input['Low'].min()) * 0.02
     long_entries = [t for t in trades_list if t['type'] == 'Long 신규진입']
@@ -362,7 +466,7 @@ if mode == "🤖 실시간 자동매매 모니터링":
             if st.button("🔄 실시간 데이터 새로고침", use_container_width=True):
                 st.rerun()
 
-        # 데이터 수집
+        # 실제 바이낸스 계좌 데이터 수집
         usdt_total, usdt_free, pos_data = fetch_live_monitoring()
         df_live = raw_df.copy() if raw_df is not None else pd.DataFrame()
 
@@ -395,7 +499,7 @@ if mode == "🤖 실시간 자동매매 모니터링":
 
         st.markdown("---")
 
-        # 2. 실전 적용 파라미터 정보 배지 (슬라이더 대신 실전 파라미터 현황 시각화)
+        # 2. 실전 적용 파라미터 정보 배지
         st.subheader("⚙️ 현재 가동 중인 실전 매매 파라미터 (고정)")
         p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
         p_col1.info(f"**레버리지**\n\n`{LIVE_LEVERAGE}x (격리)`")
@@ -449,47 +553,29 @@ if mode == "🤖 실시간 자동매매 모니터링":
 
         st.markdown("---")
 
-        # 4. 백테스트 시뮬레이터와 완벽하게 일치하는 실시간 자산 추이 및 15분봉 차트 시각화
-        X_all = df_live[features]
-        probs_all = model.predict_proba(X_all)
-        df_live['Max_Prob'] = np.max(probs_all, axis=1)
-        df_live['Pred'] = np.argmax(probs_all, axis=1)
+        # 4. 실제 바이낸스 체결 내역 및 실전 계좌 잔고 추이 시각화
+        real_trades, equity_df = fetch_real_trades_and_equity()
+        curr_bal = usdt_total if usdt_total is not None else 100.0
 
-        live_hist, live_trades = run_backtest(
-            df_live, LIVE_ENTRY_TH, LIVE_EXIT_TH, LIVE_LEVERAGE, LIVE_INVEST_RATIO, 
-            LIVE_MAX_PYRAMID, LIVE_USE_RSI_EXIT, LIVE_RSI_LONG_TH, LIVE_RSI_SHORT_TH
-        )
-
-        render_trade_charts(df_live, live_hist, live_trades, pos_data=pos_data, title_prefix="실시간 ")
+        render_real_monitoring_charts(df_live, real_trades, equity_df, pos_data=pos_data, current_balance=curr_bal)
 
         st.markdown("---")
 
-        # 5. 상세 매매 일지 (바이낸스 체결 내역 & 최근 실전 신호 일지)
-        st.subheader("📝 상세 매매 일지")
-        tab_sim, tab_real = st.tabs(["📊 최근 실전 신호/시뮬레이션 일지", "📜 바이낸스 계좌 실제 체결 이력"])
+        # 5. 실제 바이낸스 상세 체결 일지 표
+        st.subheader("📝 실제 바이낸스 체결 일지")
+        if real_trades:
+            log_df = pd.DataFrame(real_trades)
+            log_df['시간 (KST)'] = log_df['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            log_df['체결가 (USD)'] = log_df['price'].apply(lambda x: f"${x:,.2f}")
+            log_df['체결수량 (BTC)'] = log_df['amount'].apply(lambda x: f"{x:.3f}")
+            log_df['실현손익 (USDT)'] = log_df['pnl'].apply(lambda x: f"${x:+,.2f}" if x != 0 else "-")
+            log_df['수수료 (USDT)'] = log_df['fee'].apply(lambda x: f"${x:,.4f}")
 
-        with tab_sim:
-            if live_trades:
-                trades_df = pd.DataFrame(live_trades)
-                trades_df.columns = ['시간', '구분', '체결가(USD)', '수익금(USD)']
-                trades_df['시간'] = pd.to_datetime(trades_df['시간']).dt.strftime('%Y-%m-%d %H:%M')
-                trades_df['체결가(USD)'] = trades_df['체결가(USD)'].apply(lambda x: f"${x:,.2f}")
-                trades_df['수익금(USD)'] = trades_df['수익금(USD)'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
-                st.dataframe(trades_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("최근 구간 내 발생한 매매 신호가 없습니다.")
-
-        with tab_real:
-            real_trades = fetch_live_trades()
-            if real_trades:
-                real_df = pd.DataFrame(real_trades)
-                real_df['체결가(USD)'] = real_df['체결가(USD)'].apply(lambda x: f"${x:,.2f}")
-                real_df['수량(BTC)'] = real_df['수량(BTC)'].apply(lambda x: f"{x:.3f}")
-                real_df['수익금(USD)'] = real_df['수익금(USD)'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
-                real_df['수수료(USDT)'] = real_df['수수료(USDT)'].apply(lambda x: f"${x:,.4f}")
-                st.dataframe(real_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("바이낸스 계좌에서 조회된 최근 체결 내역이 없거나 API Key가 설정되지 않았습니다.")
+            show_df = log_df[['시간 (KST)', 'type', '체결가 (USD)', '체결수량 (BTC)', '실현손익 (USDT)', '수수료 (USDT)']]
+            show_df.columns = ['시간 (KST)', '구분', '체결가 (USD)', '체결수량 (BTC)', '실현손익 (USDT)', '수수료 (USDT)']
+            st.dataframe(show_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("바이낸스 계좌에서 최근 체결된 거래 내역이 없거나 API Key가 조회되지 않습니다.")
 
     render_live_monitoring()
 
@@ -543,9 +629,9 @@ elif mode == "📈 ver_2 백테스트 시뮬레이터":
         col3.metric("독립 신규 포지션 수", f"{initial_entries}회")
         col4.metric("총 매매 주문 수 (물타기 포함)", f"{initial_entries + pyramid_entries}회", f"추가 물타기 {pyramid_entries}회 포함")
 
-        render_trade_charts(df_sub, hist, trades, title_prefix="백테스트 ")
+        render_backtest_charts(df_sub, hist, trades)
 
-        st.subheader("📝 ver_2 상세 매매 일지")
+        st.subheader("📝 ver_2 백테스트 상세 매매 일지")
         if trades:
             trades_df = pd.DataFrame(trades)
             trades_df.columns = ['시간', '구분', '체결가(USD)', '수익금(USD)']
