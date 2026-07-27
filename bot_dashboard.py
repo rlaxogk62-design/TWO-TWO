@@ -58,6 +58,15 @@ def get_exchange():
 exchange = get_exchange()
 SYMBOL = 'BTC/USDT'
 
+# 봇 프로세스 실행 여부 확인 함수
+def check_bot_running():
+    try:
+        import subprocess
+        res = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+        return "binance_bot.py" in res.stdout
+    except Exception:
+        return False
+
 # 도쿄 VPS API 또는 바이낸스 선물 직접 캔들 수집 (실시간 반영을 위해 ttl=10초 설정)
 @st.cache_data(ttl=10)
 def get_candle_data():
@@ -510,15 +519,27 @@ if mode == "🤖 실시간 자동매매 모니터링":
 
         st.markdown("---")
 
-        # 2. 실전 적용 파라미터 정보 배지
-        st.subheader("⚙️ 현재 가동 중인 실전 매매 파라미터 (고정)")
-        p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
-        p_col1.info(f"**레버리지**\n\n`{LIVE_LEVERAGE}x (격리)`")
-        p_col2.info(f"**1회 진입 비중**\n\n`{int(LIVE_INVEST_RATIO*100)}%`")
-        p_col3.info(f"**진입 임계점**\n\n`{LIVE_ENTRY_TH:.2f}`")
-        p_col4.info(f"**청산 임계점**\n\n`{LIVE_EXIT_TH:.2f}`")
-        p_col5.info(f"**최대 물타기**\n\n`{LIVE_MAX_PYRAMID}회`")
-        p_col6.info(f"**RSI 청산 조건**\n\n`Long>={LIVE_RSI_LONG_TH} / Short<={LIVE_RSI_SHORT_TH}`")
+        # 2. 실전 적용 파라미터 정보 배지 (봇 가동 여부 상태 동적 반영)
+        bot_is_running = check_bot_running()
+        
+        if bot_is_running:
+            st.subheader("⚙️ 현재 가동 중인 실전 매매 파라미터 (🟢 자동매매 가동 중)")
+            p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
+            p_col1.info(f"**레버리지**\n\n`{LIVE_LEVERAGE}x (격리)`")
+            p_col2.info(f"**1회 진입 비중**\n\n`{int(LIVE_INVEST_RATIO*100)}%`")
+            p_col3.info(f"**진입 임계점**\n\n`{LIVE_ENTRY_TH:.2f}`")
+            p_col4.info(f"**청산 임계점**\n\n`{LIVE_EXIT_TH:.2f}`")
+            p_col5.info(f"**최대 물타기**\n\n`{LIVE_MAX_PYRAMID}회`")
+            p_col6.info(f"**RSI 청산 조건**\n\n`Long>={LIVE_RSI_LONG_TH} / Short<={LIVE_RSI_SHORT_TH}`")
+        else:
+            st.warning("🛑 **현재 자동매매 봇이 가동 중이지 않습니다 (일시 중지 상태)**\n\n실시간 자동 주문 및 포지션 진입이 비활성화되어 있습니다. 봇 가동 재개 시 아래 설정 파라미터로 동작합니다.")
+            p_col1, p_col2, p_col3, p_col4, p_col5, p_col6 = st.columns(6)
+            p_col1.info(f"**레버리지 (대기)**\n\n`{LIVE_LEVERAGE}x (격리)`")
+            p_col2.info(f"**1회 진입 비중**\n\n`{int(LIVE_INVEST_RATIO*100)}%`")
+            p_col3.info(f"**진입 임계점**\n\n`{LIVE_ENTRY_TH:.2f}`")
+            p_col4.info(f"**청산 임계점**\n\n`{LIVE_EXIT_TH:.2f}`")
+            p_col5.info(f"**최대 물타기**\n\n`{LIVE_MAX_PYRAMID}회`")
+            p_col6.info(f"**RSI 청산 조건**\n\n`Long>={LIVE_RSI_LONG_TH} / Short<={LIVE_RSI_SHORT_TH}`")
 
         st.markdown("---")
 
