@@ -16,7 +16,7 @@ API_KEY = os.getenv('BINANCE_API_KEY')
 SECRET_KEY = os.getenv('BINANCE_SECRET_KEY')
 
 # ver_3 최적 실전 매매 파라미터 (누수 0% 정직한 AI 모델)
-LEVERAGE = 25          # 레버리지 25배 (격리)
+LEVERAGE = 20          # 레버리지 20배 (격리)
 INVEST_RATIO = 0.25    # 1회 진입 및 물타기 비중: 총액의 25%
 ENTRY_TH = 0.40        # 최적 진입 임계점 0.40
 EXIT_TH = 0.40         # 최적 청산 임계점 0.40

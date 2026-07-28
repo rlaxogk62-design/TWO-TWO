@@ -22,7 +22,7 @@ API_KEY = os.getenv('BINANCE_API_KEY')
 SECRET_KEY = os.getenv('BINANCE_SECRET_KEY')
 
 # ver_3 실전 적용 최적 파라미터 (고정)
-LIVE_LEVERAGE = 25
+LIVE_LEVERAGE = 20
 LIVE_INVEST_RATIO = 0.25
 LIVE_ENTRY_TH = 0.40
 LIVE_EXIT_TH = 0.40
@@ -970,7 +970,7 @@ elif mode == "📈 ver_3 백테스트 시뮬레이터":
     exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.10, max_value=0.90, value=0.40, step=0.01)
 
     st.sidebar.markdown("---")
-    leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 25)
+    leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 20)
     invest_ratio = st.sidebar.slider("1회 진입 비중 (%)", 1, 50, 25) / 100.0
     max_pyramid = st.sidebar.slider("최대 물타기 허용 횟수", 0, 5, 3)
 
