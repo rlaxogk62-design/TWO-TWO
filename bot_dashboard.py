@@ -31,31 +31,12 @@ LIVE_USE_RSI_EXIT = True
 LIVE_RSI_LONG_TH = 85
 LIVE_RSI_SHORT_TH = 20
 
-# ver_2 모델 로드
-@st.cache_resource
-def load_ver2_model():
-    model_path = os.path.join(BASE_DIR, 'xgboost_btc_15m_v2_advanced.pkl')
-    if not os.path.exists(model_path):
-        model_path = os.path.join(BASE_DIR, 'ver_2', 'models', 'xgboost_btc_15m_v2_advanced.pkl')
-    return joblib.load(model_path)
-
-model = load_ver2_model()
-
-# ver_1 모델 로드
-@st.cache_resource
-def load_ver1_model():
-    model_path = os.path.join(BASE_DIR, 'ver_1', 'models', 'xgboost_btc_15m_v1.pkl')
-    if not os.path.exists(model_path):
-        return None
-    return joblib.load(model_path)
-
-model_v1 = load_ver1_model()
-
-
-# ver_3 모델 로드
+# ver_3 모델 로드 (단일 모델)
 @st.cache_resource
 def load_ver3_model():
     model_path = os.path.join(BASE_DIR, 'ver_3', 'models', 'xgboost_btc_15m_v3.pkl')
+    if not os.path.exists(model_path):
+        model_path = os.path.join(BASE_DIR, 'xgboost_btc_15m_v3.pkl')
     if not os.path.exists(model_path):
         return None
     return joblib.load(model_path)
@@ -796,7 +777,7 @@ def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_
 
 # 사이드바 메뉴 선택
 st.sidebar.title("📌 메뉴 선택")
-mode = st.sidebar.radio("모드 전환", ["🤖 실시간 자동매매 모니터링", "📈 ver_1 백테스트 시뮬레이터 (New)", "📈 ver_2 백테스트 시뮬레이터", "📈 ver_3 백테스트 시뮬레이터"])
+mode = st.sidebar.radio("모드 전환", ["🤖 ver_3 실시간 자동매매 모니터링", "📈 ver_3 백테스트 시뮬레이터"])
 
 raw_df = get_candle_data()
 
@@ -970,83 +951,6 @@ if mode == "🤖 실시간 자동매매 모니터링":
 
     render_live_monitoring()
 
-elif mode == "📈 ver_2 백테스트 시뮬레이터":
-    st.title("📈 비트코인 ver_2 AI 선물 백테스트 시뮬레이터")
-
-    st.sidebar.header("📅 투자 기간 설정")
-    min_date = raw_df.index.min().date()
-    max_date = raw_df.index.max().date()
-    col_date, col_time = st.sidebar.columns([3, 2])
-    with col_date:
-        start_date = st.date_input("시뮬레이션 시작일", min_value=min_date, max_value=max_date, value=min_date, key="start_date_v2")
-    with col_time:
-        start_time = st.time_input("시작 시각 (KST)", value=dt_time(0, 0), key="start_time_v2")
-
-    start_datetime = pd.to_datetime(f"{start_date} {start_time}")
-
-    st.sidebar.header("⚙️ ver_2 매매 파라미터")
-    entry_th = st.sidebar.slider("진입 임계점 (Entry Threshold)", min_value=0.10, max_value=0.90, value=0.42, step=0.01)
-    exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.10, max_value=0.90, value=0.40, step=0.01)
-
-    st.sidebar.markdown("---")
-    leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 25)
-    invest_ratio = st.sidebar.slider("1회 진입 비중 (%)", 1, 50, 25) / 100.0
-    max_pyramid = st.sidebar.slider("최대 물타기 허용 횟수", 0, 5, 3)
-
-    st.sidebar.markdown("---")
-    use_rsi_exit = st.sidebar.checkbox("RSI 초과 포지션 종료 적용", value=True)
-    if use_rsi_exit:
-        rsi_long_th = st.sidebar.slider("RSI 롱(Long) 청산 수치", min_value=50, max_value=95, value=85, step=1)
-        rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치", min_value=0, max_value=30, value=20, step=1)
-    else:
-        rsi_long_th, rsi_short_th = 90, 10
-
-    df_sub = raw_df[raw_df.index >= start_datetime]
-
-    if df_sub.empty:
-        st.error("선택한 날짜 이후의 데이터가 없습니다.")
-    else:
-        features = ['Returns', 'Body_Size', 'Upper_Shadow', 'Lower_Shadow', 
-                    'RSI_14', 'ATR_Ratio', 'Close_vs_SMA20', 'BB_Width', 'BB_Pos', 'Close_vs_SMA20_1H']
-        X = df_sub[features]
-        probs = model.predict_proba(X)
-        df_sub = df_sub.copy()
-        df_sub['Prob_Short'] = probs[:, 0]
-        df_sub['Prob_Hold'] = probs[:, 1]
-        df_sub['Prob_Long'] = probs[:, 2]
-        df_sub['Max_Prob'] = np.max(probs, axis=1)
-        df_sub['Pred'] = np.argmax(probs, axis=1)
-
-        hist, trades = run_backtest(df_sub, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th)
-        df_sub['Balance'] = hist
-
-        initial_entries = len([t for t in trades if '신규진입' in t['type']])
-        pyramid_entries = len([t for t in trades if '물타기' in t['type']])
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("초기 자본금", "$10,000.00")
-        col2.metric("최종 자산", f"${hist[-1]:,.2f}", f"{(hist[-1]/10000 - 1)*100:.2f}%")
-        col3.metric("독립 신규 포지션 수", f"{initial_entries}회")
-        col4.metric("총 매매 주문 수 (물타기 포함)", f"{initial_entries + pyramid_entries}회", f"추가 물타기 {pyramid_entries}회 포함")
-
-        render_backtest_charts(df_sub, hist, trades)
-
-        st.subheader("📝 ver_2 백테스트 상세 매매 일지")
-        if trades:
-            trades_df = pd.DataFrame(trades)
-            dt_series = pd.to_datetime(trades_df['date'])
-            trades_df['분석 캔들 시각'] = dt_series.dt.strftime('%Y-%m-%d %H:%M')
-            trades_df['실제 체결 시각(15분 종가)'] = (dt_series + pd.Timedelta(minutes=15)).dt.strftime('%Y-%m-%d %H:%M')
-            trades_df['구분'] = trades_df['type']
-            trades_df['체결가(USD)'] = trades_df['price'].apply(lambda x: f"${x:,.2f}")
-            trades_df['수익금(USD)'] = trades_df['profit'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
-            trades_df = trades_df[['분석 캔들 시각', '실제 체결 시각(15분 종가)', '구분', '체결가(USD)', '수익금(USD)']]
-
-            st.dataframe(trades_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("해당 기간 동안 발생한 매매 내역이 없습니다.")
-
-
 elif mode == "📈 ver_3 백테스트 시뮬레이터":
     st.title("📈 비트코인 ver_3 AI 선물 백테스트 시뮬레이터")
 
@@ -1111,85 +1015,6 @@ elif mode == "📈 ver_3 백테스트 시뮬레이터":
         render_backtest_charts(df_sub, hist, trades, model_name="ver_3")
 
         st.subheader("📝 ver_3 백테스트 상세 매매 일지")
-        if trades:
-            trades_df = pd.DataFrame(trades)
-            dt_series = pd.to_datetime(trades_df['date'])
-            trades_df['분석 캔들 시각'] = dt_series.dt.strftime('%Y-%m-%d %H:%M')
-            trades_df['실제 체결 시각(15분 종가)'] = (dt_series + pd.Timedelta(minutes=15)).dt.strftime('%Y-%m-%d %H:%M')
-            trades_df['구분'] = trades_df['type']
-            trades_df['체결가(USD)'] = trades_df['price'].apply(lambda x: f"${x:,.2f}")
-            trades_df['수익금(USD)'] = trades_df['profit'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
-            trades_df = trades_df[['분석 캔들 시각', '실제 체결 시각(15분 종가)', '구분', '체결가(USD)', '수익금(USD)']]
-
-            st.dataframe(trades_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("해당 기간 동안 발생한 매매 내역이 없습니다.")
-
-
-
-elif mode == "📈 ver_1 백테스트 시뮬레이터 (New)":
-    st.title("📈 비트코인 ver_1 AI 선물 백테스트 시뮬레이터")
-
-    st.sidebar.header("📅 투자 기간 설정")
-    min_date = raw_df.index.min().date()
-    max_date = raw_df.index.max().date()
-    col_date, col_time = st.sidebar.columns([3, 2])
-    with col_date:
-        start_date = st.date_input("시뮬레이션 시작일", min_value=min_date, max_value=max_date, value=min_date, key="start_date_v1")
-    with col_time:
-        start_time = st.time_input("시작 시각 (KST)", value=dt_time(0, 0), key="start_time_v1")
-
-    start_datetime = pd.to_datetime(f"{start_date} {start_time}")
-
-    st.sidebar.header("⚙️ ver_1 매매 파라미터")
-    entry_th = st.sidebar.slider("진입 임계점 (Entry Threshold)", min_value=0.10, max_value=0.90, value=0.42, step=0.01)
-    exit_th = st.sidebar.slider("청산 임계점 (Exit Threshold)", min_value=0.10, max_value=0.90, value=0.40, step=0.01)
-
-    st.sidebar.markdown("---")
-    leverage = st.sidebar.slider("레버리지 (Leverage)", 1, 50, 25)
-    invest_ratio = st.sidebar.slider("1회 진입 비중 (%)", 1, 50, 25) / 100.0
-    max_pyramid = st.sidebar.slider("최대 물타기 허용 횟수", 0, 5, 3)
-
-    st.sidebar.markdown("---")
-    use_rsi_exit = st.sidebar.checkbox("RSI 초과 포지션 종료 적용", value=True)
-    if use_rsi_exit:
-        rsi_long_th = st.sidebar.slider("RSI 롱(Long) 청산 수치", min_value=50, max_value=95, value=85, step=1)
-        rsi_short_th = st.sidebar.slider("RSI 숏(Short) 청산 수치", min_value=0, max_value=30, value=20, step=1)
-    else:
-        rsi_long_th, rsi_short_th = 90, 10
-
-    df_sub = raw_df[raw_df.index >= start_datetime]
-
-    if df_sub.empty:
-        st.error("선택한 날짜 이후의 데이터가 없습니다.")
-    else:
-        features_v1 = ['Open', 'High', 'Low', 'Close', 'Volume',
-                       'SMA_7', 'RSI_14_v1', 'SMA_1H', 'SMA_4H', 'Vol_4H', 'SMA_24H', 'BB_Width_v1']
-        X = df_sub[features_v1].copy()
-        # No rename needed as model_v1 uses RSI_14_v1 and BB_Width_v1
-        probs = model_v1.predict_proba(X)
-        df_sub = df_sub.copy()
-        df_sub['Prob_Short'] = probs[:, 0]
-        df_sub['Prob_Hold'] = probs[:, 1]
-        df_sub['Prob_Long'] = probs[:, 2]
-        df_sub['Max_Prob'] = np.max(probs, axis=1)
-        df_sub['Pred'] = np.argmax(probs, axis=1)
-
-        hist, trades = run_backtest(df_sub, entry_th, exit_th, leverage, invest_ratio, max_pyramid, use_rsi_exit, rsi_long_th, rsi_short_th)
-        df_sub['Balance'] = hist
-
-        initial_entries = len([t for t in trades if '신규진입' in t['type']])
-        pyramid_entries = len([t for t in trades if '물타기' in t['type']])
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("초기 자본금", "$10,000.00")
-        col2.metric("최종 자산", f"${hist[-1]:,.2f}", f"{(hist[-1]/10000 - 1)*100:.2f}%")
-        col3.metric("독립 신규 포지션 수", f"{initial_entries}회")
-        col4.metric("총 매매 주문 수 (물타기 포함)", f"{initial_entries + pyramid_entries}회", f"추가 물타기 {pyramid_entries}회 포함")
-        
-        render_backtest_charts(df_sub, hist, trades, model_name="ver_1")
-
-        st.subheader("📝 ver_1 백테스트 상세 매매 일지")
         if trades:
             trades_df = pd.DataFrame(trades)
             dt_series = pd.to_datetime(trades_df['date'])
