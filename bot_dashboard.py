@@ -809,7 +809,7 @@ else:
         st.rerun()
 
 
-if mode == "🤖 실시간 자동매매 모니터링":
+if mode == "🤖 ver_3 실시간 자동매매 모니터링":
 
     fragment_kwargs = {"run_every": refresh_sec} if auto_refresh else {}
 
