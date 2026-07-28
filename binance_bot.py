@@ -149,12 +149,49 @@ def get_account_balances():
         print(f"잔액 조회 오류: {e}")
         return 0.0, 0.0
 
+# 단일 프로세스 중복 가동 방지 Lock
+def acquire_single_instance_lock():
+    lock_file_path = os.path.join(BASE_DIR, 'binance_bot.lock')
+    try:
+        if os.name == 'posix':
+            import fcntl
+            lock_file = open(lock_file_path, 'w')
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock_file
+        else:
+            if os.path.exists(lock_file_path):
+                try:
+                    os.remove(lock_file_path)
+                except Exception:
+                    pass
+            lock_file = open(lock_file_path, 'w')
+            lock_file.write(str(os.getpid()))
+            lock_file.flush()
+            return lock_file
+    except (IOError, OSError):
+        print("❌ 이미 다른 binance_bot.py 프로세스가 가동 중입니다. 중복 가동 방지를 위해 종료합니다.")
+        exit(0)
+
+lock_handle = acquire_single_instance_lock()
+last_processed_candle_time = None
+
 # 5. 메인 매매 실행 함수 (ver_3 최적 알고리즘)
 def execute_trade():
+    global last_processed_candle_time
     # 바이낸스 API 서버의 캔들 종가 마감 정산 대기 (3초)
     time.sleep(3)
     print(f"\n--- [{time.strftime('%Y-%m-%d %H:%M:%S')}] ver_3 AI 모델 15분봉 체크 시작 ---")
     try:
+        # 백테스트 시뮬레이터와 100% 동기화된 데이터 수집
+        df = get_candle_data()
+        current_candle_time = df.index[-1]
+
+        # 동일 15분봉 캔들 중복 실행 방지
+        if last_processed_candle_time == current_candle_time:
+            print(f"⚠️ 캔들 ({current_candle_time})은 이미 매매 판단이 완료되었습니다. 중복 실행을 스킵합니다.")
+            return
+        last_processed_candle_time = current_candle_time
+
         total_equity, available_balance = get_account_balances()
         position, pos_size, avg_entry_price = get_current_position()
         state = load_state()
@@ -175,8 +212,6 @@ def execute_trade():
         print(f"📊 현재 포지션 상태: {pos_text}")
         print("-" * 40)
 
-        # 백테스트 시뮬레이터와 100% 동기화된 데이터 수집
-        df = get_candle_data()
         current_data = df.iloc[-1]
 
         features_v3 = ['Returns', 'Body_Size', 'Upper_Shadow', 'Lower_Shadow', 'Vol_Ratio',
