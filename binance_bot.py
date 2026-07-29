@@ -252,6 +252,7 @@ def execute_trade():
                     position = 0
                     save_state({'pyramid_count': 0})
                     time.sleep(2)
+                    return # 백테스트 시뮬레이터와 동일하게 한 캔들에서 청산 후 즉시 신규 진입 방지
 
             # 3. 물타기(추가 진입) 로직 (총 자산의 25% 균등 물타기)
             else:
