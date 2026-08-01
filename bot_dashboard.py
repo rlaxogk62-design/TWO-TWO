@@ -30,6 +30,7 @@ LIVE_MAX_PYRAMID = 3
 LIVE_USE_RSI_EXIT = True
 LIVE_RSI_LONG_TH = 85
 LIVE_RSI_SHORT_TH = 20
+LIVE_START_BALANCE = 451.63
 
 # ver_3 모델 로드 (단일 모델)
 @st.cache_resource
@@ -430,6 +431,8 @@ def render_real_monitoring_charts(df_candle, real_trades, equity_df, pos_data=No
             line=dict(color='#00f2fe', width=2, dash='dash')
         ))
 
+    fig_bal.add_hline(y=LIVE_START_BALANCE, line_dash="dash", line_color="gray", annotation_text=f"시작 자본금 (${LIVE_START_BALANCE:,.2f})")
+
     fig_bal.update_layout(
         template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#1e2329', height=280, 
         xaxis_title="시간 (KST)", yaxis_title="잔고 (USDT)", 
@@ -537,17 +540,38 @@ def render_real_monitoring_charts(df_candle, real_trades, equity_df, pos_data=No
                 name='실제 손익 확정 청산'
             ), row=1, col=1)
 
-    # 초기 화면 줌: 최근 120개 캔들만 한눈에 보이도록 설정
-    view_count = min(120, len(df))
+    # 초기 화면 줌: 최근 100개 캔들만 한눈에 보이도록 설정
+    view_count = min(100, len(df))
     init_start = df.index[-view_count]
     init_end = df.index[-1]
 
+    # 현재 화면에 보이는 최근 100개 캔들 구간의 Y축 (Price) 범위 타이트하게 자동 계산
+    df_view = df.iloc[-view_count:]
+    price_min = df_view['Low'].min()
+    price_max = df_view['High'].max()
+
+    ma_cols = [c for c in ['MA7', 'MA25', 'MA99'] if c in df_view.columns]
+    for c in ma_cols:
+        c_vals = df_view[c].dropna()
+        if not c_vals.empty:
+            price_min = min(price_min, c_vals.min())
+            price_max = max(price_max, c_vals.max())
+
+    if pos_data:
+        entry_p = pos_data.get('entryPrice', 0)
+        if entry_p > 0 and (price_min * 0.85 <= entry_p <= price_max * 1.15):
+            price_min = min(price_min, entry_p)
+            price_max = max(price_max, entry_p)
+
+    p_margin = (price_max - price_min) * 0.05 if price_max > price_min else price_min * 0.01
+    y_range = [price_min - p_margin, price_max + p_margin]
+
     fig_candle.update_layout(
-        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#181a20', height=650, 
+        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#181a20', height=720, 
         xaxis_rangeslider_visible=False,
         xaxis=dict(range=[init_start, init_end], type='date', gridcolor='#2b313a'),
         xaxis2=dict(range=[init_start, init_end], type='date', gridcolor='#2b313a'),
-        yaxis=dict(gridcolor='#2b313a', title="Price (USDT)", side="right"),
+        yaxis=dict(range=y_range, gridcolor='#2b313a', title="Price (USDT)", side="right", autorange=False),
         yaxis2=dict(gridcolor='#2b313a', title="Volume", side="right"),
         dragmode='pan', hovermode='x unified', margin=dict(l=10, r=60, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0)
@@ -555,14 +579,14 @@ def render_real_monitoring_charts(df_candle, real_trades, equity_df, pos_data=No
     st.plotly_chart(fig_candle, use_container_width=True, config={'scrollZoom': True})
 
 
-# 백테스트 전용 차트 렌더링 (바이낸스 프로 트레이딩뷰 스타일)
-def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_2"):
+# 백테스트 전용 차트 렌더링 (바이낸스 프로 스타일)
+def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_3"):
     st.subheader(f"💰 백테스트 누적 자산 변화 ({model_name} 모델)")
     fig_bal = go.Figure()
     fig_bal.add_trace(go.Scatter(x=df_input.index, y=balance_hist, mode='lines', name='포트폴리오 가치', line=dict(color='#00f2fe', width=2)))
     fig_bal.add_hline(y=10000, line_dash="dash", line_color="gray", annotation_text="초기 자본금 ($10,000)")
     fig_bal.update_layout(
-        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#181a20', height=260, 
+        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#181a20', height=280, 
         xaxis_title="Date", yaxis_title="Balance (USD)", yaxis=dict(side="right", gridcolor='#2b313a'),
         dragmode='pan', hovermode='x unified', margin=dict(l=10, r=60, t=30, b=10)
     )
@@ -581,7 +605,7 @@ def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_
         vertical_spacing=0.02, row_heights=[0.78, 0.22]
     )
 
-    # A. 캔들스틱 차트
+    # A. 캔들스틱 차트 (바이낸스 표준 색상: 녹색 #0ecb81, 빨간색 #f6465d)
     fig_candle.add_trace(go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='BTC/USDT',
         increasing_line_color='#0ecb81', increasing_fillcolor='#0ecb81',
@@ -619,118 +643,12 @@ def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_
 
     # D. 현재 실시간 가격 라인
     last_price = df['Close'].iloc[-1]
-    fig_candle.add_hline(y=last_price, line_dash="dash", line_color="#00e676",
-                         annotation_text=f"현재가: ${last_price:,.2f}", annotation_position="top right", row=1, col=1)
+    fig_candle.add_hline(y=last_price, line_dash="dash", line_color="#0ecb81",
+                         annotation_text=f"  ${last_price:,.1f}  ", annotation_position="top right",
+                         annotation_font=dict(color="black", size=11), annotation_bgcolor="#0ecb81",
+                         row=1, col=1)
 
-    # E. 실전 포지션 평단가 & 추정 청산가 라인
-    if pos_data:
-        side = pos_data.get('side', '')
-        entry_p = pos_data.get('entryPrice', 0)
-        liq_p = pos_data.get('liquidationPrice', 0)
-        line_col = "#0ecb81" if side == "LONG" else "#f6465d"
-        if entry_p > 0:
-            fig_candle.add_hline(y=entry_p, line_dash="dash", line_color=line_col, 
-                                 annotation_text=f"🎯 실전 {side} 진입평단: ${entry_p:,.2f}", annotation_position="top left", row=1, col=1)
-        if liq_p > 0:
-            fig_candle.add_hline(y=liq_p, line_dash="dot", line_color="#ff9800", 
-                                 annotation_text=f"🚨 추정 청산가: ${liq_p:,.2f}", annotation_position="bottom left", row=1, col=1)
-
-    # F. 실제 바이낸스 체결 타점 마커
-    if real_trades:
-        buy_trades = [t for t in real_trades if t['raw_side'] == 'BUY']
-        sell_trades = [t for t in real_trades if t['raw_side'] == 'SELL']
-        pnl_trades = [t for t in real_trades if t['pnl'] != 0]
-
-        margin = (df['High'].max() - df['Low'].min()) * 0.015
-
-        if buy_trades:
-            fig_candle.add_trace(go.Scatter(
-                x=[t['date'] for t in buy_trades], y=[t['price'] - margin for t in buy_trades],
-                mode='markers', marker=dict(symbol='triangle-up', size=14, color='#0ecb81', line=dict(width=1, color='#004d40')),
-                name='실제 매수 체결 (BUY)'
-            ), row=1, col=1)
-        if sell_trades:
-            fig_candle.add_trace(go.Scatter(
-                x=[t['date'] for t in sell_trades], y=[t['price'] + margin for t in sell_trades],
-                mode='markers', marker=dict(symbol='triangle-down', size=14, color='#f6465d', line=dict(width=1, color='#880e4f')),
-                name='실제 매도 체결 (SELL)'
-            ), row=1, col=1)
-        if pnl_trades:
-            fig_candle.add_trace(go.Scatter(
-                x=[t['date'] for t in pnl_trades], y=[t['price'] for t in pnl_trades],
-                mode='markers', marker=dict(symbol='x', size=12, color='#ffd600'),
-                name='실제 손익 확정 청산'
-            ), row=1, col=1)
-
-    # 초기 화면 줌: 최근 100개 캔들만 한눈에 보이도록 설정 (캔들이 두껍고 선명하게 보임)
-    view_count = min(100, len(df))
-    init_start = df.index[-view_count]
-    init_end = df.index[-1]
-
-    fig_candle.update_layout(
-        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#1e2329', height=650, 
-        xaxis_rangeslider_visible=False,
-        xaxis=dict(range=[init_start, init_end], type='date'),
-        xaxis2=dict(range=[init_start, init_end], type='date'),
-        yaxis_title="Price (USD)", yaxis2_title="Vol",
-        dragmode='pan', hovermode='x unified', margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0)
-    )
-    st.plotly_chart(fig_candle, use_container_width=True, config={'scrollZoom': True})
-
-
-# 백테스트 전용 차트 렌더링 (바이낸스 프로 스타일)
-def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_2"):
-    st.subheader(f"💰 백테스트 누적 자산 변화 ({model_name} 모델)")
-    fig_bal = go.Figure()
-    fig_bal.add_trace(go.Scatter(x=df_input.index, y=balance_hist, mode='lines', name='포트폴리오 가치', line=dict(color='#00f2fe', width=2)))
-    fig_bal.add_hline(y=10000, line_dash="dash", line_color="gray", annotation_text="초기 자본금 ($10,000)")
-    fig_bal.update_layout(
-        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#1e2329', height=280, 
-        xaxis_title="Date", yaxis_title="Balance (USD)", dragmode='pan', hovermode='x unified', margin=dict(l=10, r=10, t=30, b=10)
-    )
-    st.plotly_chart(fig_bal, use_container_width=True, config={'scrollZoom': True})
-
-    st.subheader(f"📈 바이낸스 선물 15분봉 및 {model_name} 백테스트 진입/청산 타점 시각화")
-    
-    df = df_input.copy()
-    if 'SMA20' not in df.columns:
-        df['SMA20'] = df['Close'].rolling(20).mean()
-    if 'SMA50' not in df.columns:
-        df['SMA50'] = df['Close'].rolling(50).mean()
-
-    fig_candle = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        vertical_spacing=0.03, row_heights=[0.78, 0.22]
-    )
-
-    # A. 캔들스틱 차트
-    fig_candle.add_trace(go.Candlestick(
-        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='BTC/USDT',
-        increasing_line_color='#0ecb81', increasing_fillcolor='#0ecb81',
-        decreasing_line_color='#f6465d', decreasing_fillcolor='#f6465d'
-    ), row=1, col=1)
-
-    # B. 이동평균선
-    fig_candle.add_trace(go.Scatter(
-        x=df.index, y=df['SMA20'], mode='lines', name='MA(20)',
-        line=dict(color='#f0b90b', width=1.2)
-    ), row=1, col=1)
-
-    fig_candle.add_trace(go.Scatter(
-        x=df.index, y=df['SMA50'], mode='lines', name='MA(50)',
-        line=dict(color='#e040fb', width=1.2)
-    ), row=1, col=1)
-
-    # C. 거래량 서브플롯
-    if 'Volume' in df.columns:
-        vol_colors = ['#0ecb81' if c >= o else '#f6465d' for c, o in zip(df['Close'], df['Open'])]
-        fig_candle.add_trace(go.Bar(
-            x=df.index, y=df['Volume'], name='Volume',
-            marker_color=vol_colors, opacity=0.8
-        ), row=2, col=1)
-
-    # D. 백테스트 타점 마커
+    # E. 백테스트 타점 마커
     margin = (df['High'].max() - df['Low'].min()) * 0.015
     long_entries = [t for t in trades_list if t['type'] == 'Long 신규진입']
     short_entries = [t for t in trades_list if t['type'] == 'Short 신규진입']
@@ -741,16 +659,16 @@ def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_
 
     if long_entries:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in long_entries], y=[t['price'] - margin for t in long_entries],
-                                        mode='markers', marker=dict(symbol='triangle-up', size=12, color='#0ecb81', line=dict(width=1, color='#004d40')), name='Long 신규진입'), row=1, col=1)
+                                        mode='markers', marker=dict(symbol='triangle-up', size=14, color='#0ecb81', line=dict(width=1, color='#004d40')), name='Long 신규진입'), row=1, col=1)
     if short_entries:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in short_entries], y=[t['price'] + margin for t in short_entries],
-                                        mode='markers', marker=dict(symbol='triangle-down', size=12, color='#f6465d', line=dict(width=1, color='#880e4f')), name='Short 신규진입'), row=1, col=1)
+                                        mode='markers', marker=dict(symbol='triangle-down', size=14, color='#f6465d', line=dict(width=1, color='#880e4f')), name='Short 신규진입'), row=1, col=1)
     if add_margins:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in add_margins], y=[t['price'] for t in add_margins],
-                                        mode='markers', marker=dict(symbol='star', size=10, color='#29b6f6'), name='물타기 (추가진입)'), row=1, col=1)
+                                        mode='markers', marker=dict(symbol='star', size=12, color='#29b6f6'), name='물타기 (추가진입)'), row=1, col=1)
     if model_exits:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in model_exits], y=[t['price'] for t in model_exits],
-                                        mode='markers', marker=dict(symbol='x', size=10, color='#ffd600'), name='신호 포지션 종료'), row=1, col=1)
+                                        mode='markers', marker=dict(symbol='x', size=12, color='#ffd600'), name='신호 포지션 종료'), row=1, col=1)
     if rsi_exits:
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in rsi_exits], y=[t['price'] for t in rsi_exits],
                                         mode='markers', marker=dict(symbol='x', size=12, color='#ff9800'), name='RSI 초과 포지션 종료'), row=1, col=1)
@@ -758,21 +676,36 @@ def render_backtest_charts(df_input, balance_hist, trades_list, model_name="ver_
         fig_candle.add_trace(go.Scatter(x=[t['date'] for t in liquidations], y=[t['price'] for t in liquidations],
                                         mode='markers', marker=dict(symbol='x', size=14, color='#ab47bc'), name='마진콜 강제청산'), row=1, col=1)
 
+    # 초기 화면 줌: 최근 100개 캔들만 한눈에 보이도록 설정
     view_count = min(100, len(df))
     init_start = df.index[-view_count]
     init_end = df.index[-1]
 
+    df_view = df.iloc[-view_count:]
+    price_min = df_view['Low'].min()
+    price_max = df_view['High'].max()
+
+    ma_cols = [c for c in ['MA7', 'MA25', 'MA99'] if c in df_view.columns]
+    for c in ma_cols:
+        c_vals = df_view[c].dropna()
+        if not c_vals.empty:
+            price_min = min(price_min, c_vals.min())
+            price_max = max(price_max, c_vals.max())
+
+    p_margin = (price_max - price_min) * 0.05 if price_max > price_min else price_min * 0.01
+    y_range = [price_min - p_margin, price_max + p_margin]
+
     fig_candle.update_layout(
-        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#1e2329', height=650, 
+        template='plotly_dark', paper_bgcolor='#12161c', plot_bgcolor='#181a20', height=720, 
         xaxis_rangeslider_visible=False,
-        xaxis=dict(range=[init_start, init_end], type='date'),
-        xaxis2=dict(range=[init_start, init_end], type='date'),
-        yaxis_title="Price (USD)", yaxis2_title="Vol",
-        dragmode='pan', hovermode='x unified', margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(range=[init_start, init_end], type='date', gridcolor='#2b313a'),
+        xaxis2=dict(range=[init_start, init_end], type='date', gridcolor='#2b313a'),
+        yaxis=dict(range=y_range, gridcolor='#2b313a', title="Price (USDT)", side="right", autorange=False),
+        yaxis2=dict(gridcolor='#2b313a', title="Volume", side="right"),
+        dragmode='pan', hovermode='x unified', margin=dict(l=10, r=60, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0)
     )
     st.plotly_chart(fig_candle, use_container_width=True, config={'scrollZoom': True})
-
 
 
 # 사이드바 메뉴 선택
@@ -835,16 +768,25 @@ if mode == "🤖 ver_3 실시간 자동매매 모니터링":
 
         current_price = df_live['Close'].iloc[-1]
 
-        # 1. 핵심 지표 카드 (4 메트릭)
-        m1, m2, m3, m4 = st.columns(4)
-        if usdt_total is not None:
-            m1.metric("총 보유 자산 (USDT)", f"${usdt_total:,.2f}")
-            m2.metric("사용 가능 잔고 (USDT)", f"${usdt_free:,.2f}")
-        else:
-            m1.metric("총 보유 자산", "조회 불가 (API Key 확인)")
-            m2.metric("사용 가능 잔고", "조회 불가")
+        # 1. 핵심 지표 카드 (5 메트릭: 시뮬레이터 스타일 실시간 수익률 및 시작 자본금 반영)
+        m1, m2, m3, m4, m5 = st.columns(5)
+        
+        m1.metric("시작 자본금", f"${LIVE_START_BALANCE:,.2f}")
 
-        m3.metric("현재 비트코인 가격", f"${current_price:,.2f}")
+        if usdt_total is not None:
+            unrealized_pnl = pos_data['unrealizedPnl'] if pos_data else 0.0
+            total_equity = usdt_total + unrealized_pnl
+            total_pnl_usd = total_equity - LIVE_START_BALANCE
+            total_pnl_pct = (total_equity / LIVE_START_BALANCE - 1.0) * 100.0
+            
+            delta_str = f"{total_pnl_pct:+.2f}% (${total_pnl_usd:+,.2f})"
+            m2.metric("현재 평가 자산 (USDT)", f"${total_equity:,.2f}", delta=delta_str)
+            m3.metric("사용 가능 잔고 (USDT)", f"${usdt_free:,.2f}")
+        else:
+            m2.metric("현재 평가 자산", "조회 불가 (API Key 확인)")
+            m3.metric("사용 가능 잔고", "조회 불가")
+
+        m4.metric("현재 비트코인 가격", f"${current_price:,.2f}")
 
         if pos_data:
             side = pos_data['side']
@@ -852,9 +794,9 @@ if mode == "🤖 ver_3 실시간 자동매매 모니터링":
             pnl_roe = pos_data['pnlRoe']
             leverage = pos_data['leverage']
             delta_color = "normal" if unrealized_pnl >= 0 else "inverse"
-            m4.metric(f"포지션: {side} ({leverage}x)", f"${unrealized_pnl:,.2f} ({pnl_roe:+.2f}%)", delta_color=delta_color)
+            m5.metric(f"포지션: {side} ({leverage}x)", f"${unrealized_pnl:,.2f} ({pnl_roe:+.2f}%)", delta_color=delta_color)
         else:
-            m4.metric("현재 포지션", "없음 (대기중)")
+            m5.metric("현재 포지션", "없음 (대기중)")
 
         st.markdown("---")
 
